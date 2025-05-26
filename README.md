@@ -1,6 +1,6 @@
 # MotilityMap
 
-Version: Beta 
+Beta Version
 
 Overview
 The Binocular Vision Diagnostic Tool is an interactive web application designed to assist optometrists and eye care professionals in the systematic diagnosis and documentation of ocular motility disorders. It streamlines the assessment process with a guided diagnostic flow, dynamic visual feedback on eye conditions, and convenient patient data management features.
