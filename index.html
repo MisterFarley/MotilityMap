@@ -1,0 +1,2764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MotiltyMap: Binocular Vision Diagnostic Tool</title>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables (will be initialized in script)
+        window.firebaseApp = null;
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.isAuthReady = false; // Flag to ensure auth is ready before Firestore ops
+
+        // Make Firestore functions globally accessible
+        window.firestore = {
+            initializeApp: initializeApp, // Make initializeApp accessible
+            getFirestore: getFirestore,
+            doc: doc,
+            getDoc: getDoc,
+            addDoc: addDoc,
+            setDoc: setDoc,
+            updateDoc: updateDoc,
+            deleteDoc: deleteDoc,
+            onSnapshot: onSnapshot,
+            collection: collection,
+            query: query,
+            where: where,
+            getDocs: getDocs
+        };
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+
+                window.firebaseApp = window.firestore.initializeApp(firebaseConfig);
+                window.db = window.firestore.getFirestore(window.firebaseApp);
+                window.auth = getAuth(window.firebaseApp);
+
+                onAuthStateChanged(window.auth, async (user) => {
+                    if (user) {
+                        window.userId = user.uid;
+                        console.log("Authenticated with Firebase UID:", window.userId);
+                    } else {
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined') {
+                                await signInWithCustomToken(window.auth, __initial_auth_token);
+                                window.userId = window.auth.currentUser.uid;
+                                console.log("Signed in with custom token:", window.userId);
+                            } else {
+                                await signInAnonymously(window.auth);
+                                window.userId = window.auth.currentUser.uid;
+                                console.warn("Signed in anonymously. Using UID:", window.userId);
+                            }
+                        } catch (error) {
+                            console.error("Firebase authentication error:", error);
+                            window.userId = crypto.randomUUID();
+                            console.warn("Using random UUID as userId due to authentication failure:", window.userId);
+                        }
+                    }
+                    window.isAuthReady = true;
+                    document.getElementById('userIdDisplay').textContent = `User ID: ${window.userId}`;
+                    loadSavedDiagnosesList();
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                window.userId = crypto.randomUUID();
+                document.getElementById('userIdDisplay').textContent = `User ID: ${window.userId} (Auth Error)`;
+                window.isAuthReady = true;
+            }
+        });
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #3498db;
+            --accent-color: #e74c3c;
+            --background-color: #f8f9fa;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: var(--background-color);
+            color: var(--primary-color);
+        }
+
+        .diagnostic-container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .question {
+            font-size: 1.4em;
+            color: var(--primary-color);
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+
+        .options-container {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .option-button {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 6px;
+            background-color: var(--secondary-color);
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: left;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1.1em;
+        }
+
+        .option-button:hover {
+            background-color: #2980b9;
+            transform: translateY(-2px);
+        }
+
+        .diagnosis {
+            background-color: #e8f4f8;
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 20px;
+            border-left: 5px solid #3498db;
+        }
+
+        .diagnosis h3 {
+            color: var(--primary-color);
+            margin-top: 0;
+            font-size: 1.3em;
+        }
+
+        .diagnosis strong {
+            color: var(--accent-color);
+        }
+
+        .history-panel {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: white;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .history-panel h3 {
+            color: var(--primary-color);
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+
+        .history-item {
+            margin-bottom: 10px;
+            padding: 8px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            font-size: 0.95em;
+        }
+
+        .history-item strong {
+            color: var(--secondary-color);
+        }
+
+        .urgent {
+            background-color: var(--accent-color);
+            color: white;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .procedure-list {
+            list-style-type: none;
+            padding: 0;
+            margin-top: 15px;
+        }
+
+        .procedure-list li {
+            margin-bottom: 8px;
+            padding-left: 20px;
+            position: relative;
+            font-size: 0.95em;
+        }
+
+        .procedure-list li::before {
+            content: "•";
+            position: absolute;
+            left: 0;
+            color: var(--secondary-color);
+            font-size: 1.2em;
+            line-height: 1;
+        }
+
+        .procedure-list li strong {
+            color: var(--primary-color);
+        }
+
+        .testing-details {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f0f8ff;
+            border-left: 3px solid #add8e6;
+            border-radius: 4px;
+        }
+
+        .testing-details h4 {
+            margin-top: 0;
+            color: var(--primary-color);
+            font-size: 1.1em;
+        }
+
+        .testing-details ul {
+            list-style-type: disc;
+            margin-left: 20px;
+            padding-left: 0;
+        }
+
+        #resetButton, #backButton {
+            background-color: #95a5a6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: background-color 0.3s ease;
+        }
+
+        #resetButton:hover, #backButton:hover {
+            background-color: #7f8c8d;
+        }
+
+        /* Updated Gaze Grid CSS */
+        .gaze-grid-wrapper { /* New wrapper for the grid and its header/legend */
+            margin-top: 20px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+            border: 1px solid #ccc; /* Border for the whole wrapper */
+            padding: 5px;
+            border-radius: 8px;
+            background-color: white;
+        }
+
+        .gaze-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            grid-template-rows: repeat(3, 1fr);
+            gap: 5px;
+            /* Removed border, padding, background-color as they are now on wrapper */
+        }
+
+        .gaze-position {
+            padding: 8px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            text-align: center;
+            font-size: 1.2em;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.3s ease;
+            overflow: hidden; /* Ensure content doesn't spill out */
+        }
+
+        .gaze-position .muscle-label {
+            font-size: 0.7em;
+            position: absolute;
+            bottom: 2px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #666;
+            white-space: nowrap;
+        }
+
+        .gaze-position .eye-icon {
+            font-size: 1.2em;
+            position: relative; /* For pseudo-elements and transformations */
+            z-index: 2; /* Ensure it's above pseudo-elements if needed */
+        }
+
+        .gaze-position[data-muscle=""] {
+            background-color: #e3f2fd;
+        }
+
+        .gaze-position.highlight {
+            background-color: #ffe082;
+            font-weight: bold;
+            border: 1px solid #ffb300;
+        }
+
+        /* Animations for ocular conditions */
+        .fatiguable .eye-icon {
+            animation: fatigue 3s infinite;
+        }
+        .nystagmus .eye-icon {
+            animation: nystagmus 0.2s infinite;
+        }
+        @keyframes fatigue {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        @keyframes nystagmus {
+            0% { transform: translateX(0); }
+            25% { transform: translateX(2px); }
+            75% { transform: translateX(-2px); }
+            100% { transform: translateX(0); }
+        }
+        /* Special condition styles (visual cues, not animations) */
+        .proptosis .eye-icon {
+            transform: scale(1.2);
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        .ptosis .eye-icon::before { /* Pseudo-element for ptosis effect */
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 50%; /* Adjust to simulate lid droop */
+            background: rgba(0,0,0,0.3); /* Dark overlay */
+            border-radius: 4px 4px 0 0;
+            z-index: 1; /* Below the eye icon */
+        }
+        .variable-ptosis .eye-icon::before {
+            animation: ptosis 3s infinite;
+        }
+        @keyframes ptosis {
+            0%, 100% { height: 0%; background: transparent; } /* Open */
+            50% { height: 50%; background: rgba(0,0,0,0.3); } /* Droop */
+        }
+        .dilated-pupil .eye-icon::after {
+            content: '⚫'; /* Large black circle for pupil */
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 0.5em; /* Smaller than eye icon */
+            z-index: 3; /* Above eye icon */
+        }
+        .restricted .eye-icon {
+            opacity: 0.5; /* Dimmed to show restriction */
+        }
+        .mechanical-restriction .eye-icon::after {
+            content: '🔒'; /* Lock icon */
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            font-size: 0.7em;
+            z-index: 4;
+        }
+        .globe-retraction .eye-icon {
+            animation: retraction 2s infinite;
+        }
+        @keyframes retraction {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(0.8); }
+        }
+
+        /* Head Position Indicators */
+        .head-tilt-right::before {
+            content: '↻'; /* Clockwise rotation */
+            position: absolute;
+            top: -15px;
+            right: -15px;
+            font-size: 1.2em;
+            z-index: 5;
+            color: var(--accent-color);
+        }
+        .head-tilt-left::before {
+            content: '↺'; /* Counter-clockwise rotation */
+            position: absolute;
+            top: -15px;
+            left: -15px;
+            font-size: 1.2em;
+            z-index: 5;
+            color: var(--accent-color);
+        }
+        .face-turn-right::before {
+            content: '↳'; /* Arrow pointing right */
+            position: absolute;
+            top: -15px;
+            right: -15px;
+            font-size: 1.2em;
+            z-index: 5;
+            color: var(--accent-color);
+        }
+        .face-turn-left::before {
+            content: '↰'; /* Arrow pointing left */
+            position: absolute;
+            top: -15px;
+            left: -15px;
+            font-size: 1.2em;
+            z-index: 5;
+            color: var(--accent-color);
+        }
+
+        /* Measurement Overlay */
+        .measurement-overlay {
+            position: absolute;
+            bottom: 0; /* Position at the bottom of the gaze-position div */
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 0.7em; /* Smaller font for measurements */
+            color: #333;
+            background: rgba(255,255,255,0.7);
+            padding: 2px 0;
+            border-top: 1px solid #eee;
+            z-index: 10; /* Ensure it's on top */
+        }
+        .measurement-legend {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-size: 0.9em;
+            border: 1px solid #eee;
+        }
+        .legend-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: var(--primary-color);
+        }
+        .legend-item {
+            display: inline-block;
+            margin-right: 15px;
+            color: #666;
+        }
+        .condition-header {
+            text-align: center;
+            margin-bottom: 15px;
+            padding: 5px;
+            background-color: #e9ecef;
+            border-radius: 4px;
+        }
+        .affected-eye {
+            font-weight: bold;
+            color: var(--primary-color);
+            font-size: 1.1em;
+            margin-bottom: 5px;
+        }
+        .gaze-instructions {
+            color: #666;
+            font-size: 0.8em;
+        }
+    </style>
+</head>
+<body>
+    <div id="userIdDisplay">Loading User ID...</div>
+    <div class="diagnostic-container">
+        <div id="questionContainer" class="question"></div>
+        <div id="optionsContainer" class="options-container"></div>
+        <div id="diagnosisContainer" class="diagnosis" style="display: none;"></div>
+        
+        <div id="gazeGridWrapper" class="gaze-grid-wrapper">
+            <div id="conditionHeader" class="condition-header" style="display: none;">
+                <div id="affectedEyeDisplay" class="affected-eye"></div>
+                <div class="gaze-instructions">Nine Position Gaze Test</div>
+            </div>
+            <div id="gazeGridContent" class="gaze-grid"></div>
+            <div id="measurementLegend" class="measurement-legend" style="display: none;"></div>
+        </div>
+
+        <div id="pdfSummarySection" class="pdf-summary-section" style="display: none;">
+            <h4>Generate Printable Summary</h4>
+            <input type="text" id="patientNameInput" placeholder="Patient Name">
+            <input type="text" id="patientIdInput" placeholder="Patient ID">
+            <input type="text" id="clinicianNameInput" placeholder="Clinician Name">
+            <input type="text" id="signatureInput" placeholder="Signature">
+            <button onclick="downloadPdfSummary()">Download PDF Summary</button>
+        </div>
+    </div>
+
+    <div class="data-management-section">
+        <h4>Data Management</h4>
+        <button class="save" onclick="saveCurrentDiagnosis()">Save Current Diagnosis</button>
+        <button class="load" onclick="showLoadDiagnosisPanel()">Load Saved Diagnoses</button>
+        <ul id="savedDiagnosesList"></ul>
+    </div>
+
+    <div id="historyPanel" class="history-panel">
+        <h3>Diagnostic Path</h3>
+        <div id="historyContainer"></div>
+    </div>
+    <button id="backButton" onclick="goBack()" style="display: none;">⬅️ Back</button>
+    <button id="resetButton" onclick="resetDiagnostic()" style="display: none;">Start New Diagnosis</button>
+
+    <script type="text/javascript">
+        const diagnosticTree = {
+            "nodes": [
+                {
+                    "id": "initial-assessment",
+                    "question": "Begin Diagnostic Flow: What is the initial assessment?",
+                    "category": "entry",
+                    "options": [
+                        { "label": "Perform Cover Test", "icon": "👁️", "nextId": "cover-test-protocol" },
+                        { "label": "Patient presents with Acute Onset Symptoms", "icon": "⚡", "nextId": "acute-onset-pathway" }
+                    ]
+                },
+                {
+                    "id": "cover-test-protocol",
+                    "question": "Systematic Cover Test Evaluation:",
+                    "category": "testing",
+                    "procedure": [
+                        { "step": "Visual acuity check (for Amblyopia, Sensory component, Suppression)", "source": "21" },
+                        { "step": "Unilateral Cover Test", "source": "40" },
+                        { "step": "Alternate Cover Test", "source": "41" },
+                        { "step": "Measurements (Prism cover test, Krimsky if poor fixation, NPC, Stereopsis)", "source": "21" }
+                    ],
+                    "options": [
+                        { "label": "Tropia Present (Movement of uncovered eye in UCT)", "icon": "↔️", "nextId": "comitant-check" },
+                        { "label": "Phoria Present (Movement in ACT, no UCT movement)", "icon": "↔️", "nextId": "phoria-evaluation" },
+                        { "label": "Orthophoric (No movement in ACT)", "icon": "✅", "nextId": "motility-assessment" }
+                    ]
+                },
+                {
+                    "id": "phoria-evaluation",
+                    "question": "Characteristics of the Phoria:",
+                    "category": "binocular",
+                    "options": [
+                        { "label": "Worse at distance (Divergence Excess)", "icon": "↔️", "nextId": "intermittent-exotropia" },
+                        { "label": "Worse at near (Convergence Insufficiency)", "icon": "↔️", "nextId": "convergence-insufficiency" },
+                        { "label": "Phoria causing symptoms (Decompensated Phoria)", "icon": "😩", "nextId": "decompensated-phoria" },
+                        { "label": "No symptoms/Well-controlled", "icon": "✅", "nextId": "no-tropia" }
+                    ]
+                },
+                {
+                    "id": "no-tropia",
+                    "diagnosis": "No Tropia Detected (Phoria Likely)",
+                    "advice": "Further investigation for phorias or other binocular vision anomalies may be required. Consider a comprehensive binocular vision assessment. If symptomatic, evaluate for decompensation.",
+                    "category": "entry"
+                },
+                {
+                    "id": "comitant-check",
+                    "question": "Is the deviation constant in all directions of gaze?",
+                    "category": "comitant",
+                    "options": [
+                        { "label": "Yes (Comitant)", "icon": "🔵", "nextId": "comitant-age-onset" },
+                        { "label": "No (Incomitant)", "icon": "🔴", "nextId": "incomitant-onset-type" }
+                    ]
+                },
+                {
+                    "id": "comitant-age-onset",
+                    "question": "What is the age of onset?",
+                    "category": "comitant",
+                    "options": [
+                        { "label": "Infantile/Early Childhood (<6 months)", "nextId": "pediatric-infantile-strabismus" },
+                        { "label": "Childhood (>6 months)", "nextId": "pediatric-childhood-strabismus" },
+                        { "label": "Adult", "nextId": "adult-comitant-strabismus" }
+                    ]
+                },
+                {
+                    "id": "pediatric-infantile-strabismus",
+                    "question": "Age of presentation: Birth to 6 months",
+                    "category": "congenital",
+                    "options": [
+                        { "label": "Large angle Esotropia (ET)", "nextId": "infantile-esotropia" },
+                        { "label": "Large angle Exotropia (XT)", "nextId": "congenital-exotropia" }
+                    ]
+                },
+                {
+                    "id": "infantile-esotropia",
+                    "diagnosis": "Infantile Esotropia",
+                    "advice": "Early surgical intervention typically indicated by 18-24 months. Monitor amblyopia and follow motor fusion.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "congenital-exotropia",
+                    "diagnosis": "Congenital Exotropia",
+                    "advice": "Rule out neurological causes. Management involves surgery for alignment. Prognosis for binocularity often limited.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "pediatric-childhood-strabismus",
+                    "question": "Age of presentation: 6 months to 2 years or >2 years",
+                    "category": "comitant",
+                    "options": [
+                        { "label": "ET with high hyperopia", "nextId": "accommodative-esotropia" },
+                        { "label": "Small angle ET", "nextId": "microtropia" },
+                        { "label": "Intermittent XT", "nextId": "intermittent-strabismus-branch" },
+                        { "label": "Late-onset ET (rule out neurological)", "nextId": "acute-comitant" }
+                    ]
+                },
+                {
+                    "id": "accommodative-esotropia",
+                    "diagnosis": "Accommodative Esotropia",
+                    "advice": "Full hyperopic correction. Monitor angle with correction, AC/A ratio, and near deviation. Consider bifocals if high AC/A or surgery for residual deviation.",
+                    "category": "comitant"
+                },
+                {
+                    "id": "microtropia",
+                    "diagnosis": "Microtropia / Monofixation Syndrome",
+                    "advice": "Monitor for amblyopia. Amblyopia management. Often stable angle <10pd. Binocularity present with foveal suppression.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "intermittent-strabismus-branch",
+                    "question": "When is the deviation worse?",
+                    "category": "decompensated",
+                    "options": [
+                        { "label": "Distance (Basic or Divergence Excess)", "icon": "↔️", "nextId": "intermittent-exotropia" },
+                        { "label": "Near (Convergence Insufficiency Type)", "icon": "↔️", "nextId": "convergence-insufficiency" },
+                        { "label": "Equal distance/near, but poor control", "icon": "↔️", "nextId": "intermittent-exotropia-poor-control" }
+                    ]
+                },
+                {
+                    "id": "intermittent-exotropia",
+                    "diagnosis": "Intermittent Exotropia (Basic or Divergence Excess)",
+                    "advice": "Monitor for frequency and control. Consider prisms, orthoptics, or surgery based on symptoms and progression. Good control: monitor; Poor control: consider intervention.",
+                    "category": "decompensated"
+                },
+                {
+                    "id": "intermittent-exotropia-poor-control",
+                    "diagnosis": "Intermittent Exotropia (Poor Control)",
+                    "advice": "Consider intervention including prisms, orthoptics, or surgery due to poor control.",
+                    "category": "decompensated"
+                },
+                {
+                    "id": "convergence-insufficiency",
+                    "diagnosis": "Convergence Insufficiency Exotropia",
+                    "advice": "Vision therapy/orthoptics is the primary treatment. Prisms or surgery are options if therapy fails.",
+                    "category": "decompensated"
+                },
+                {
+                    "id": "adult-comitant-strabismus",
+                    "question": "Select the adult comitant type:",
+                    "category": "comitant",
+                    "options": [
+                        { "label": "Acute Comitant Strabismus", "nextId": "acute-comitant" },
+                        { "label": "Decompensated Phoria", "nextId": "decompensated-phoria" },
+                        { "label": "Nystagmus Blockage Syndrome", "nextId": "nystagmus-blockage-syndrome" },
+                        { "label": "Functional (Non-Organic) Strabismus", "nextId": "functional-strabismus" }
+                    ]
+                },
+                {
+                    "id": "acute-comitant",
+                    "diagnosis": "Acute Comitant Strabismus (Adult)",
+                    "advice": "Thorough neurological evaluation (urgent neuroimaging often indicated) to rule out intracranial pathology. Often indicates decompensation of a pre-existing phoria or new onset neurological event.",
+                    "category": "comitant"
+                },
+                {
+                    "id": "decompensated-phoria",
+                    "diagnosis": "Decompensated Phoria",
+                    "advice": "Investigate triggers for decompensation (e.g., general health, fatigue, presbyopia). Management may include prisms, orthoptics, or surgery.",
+                    "category": "decompensated"
+                },
+                {
+                    "id": "nystagmus-blockage-syndrome",
+                    "diagnosis": "Nystagmus Blockage Syndrome",
+                    "advice": "Often associated with esotropia. Surgery may improve nystagmus and strabismus. Refer to specialist.",
+                    "category": "other"
+                },
+                {
+                    "id": "functional-strabismus",
+                    "diagnosis": "Functional (Non-Organic) Strabismus",
+                    "advice": "Careful clinical observation and assessment. Rule out organic causes. Management may involve counseling and supportive care.",
+                    "category": "other"
+                },
+                {
+                    "id": "incomitant-onset-type",
+                    "question": "Is the onset acute or gradual?",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Acute (days to weeks)", "nextId": "acute-incomitant-branch" },
+                        { "label": "Gradual/Congenital", "nextId": "chronic-congenital-branch" }
+                    ]
+                },
+                {
+                    "id": "acute-incomitant-branch",
+                    "question": "Is there isolated muscle weakness or multiple muscle involvement?",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Single muscle/direction", "nextId": "isolated-palsy-branch" },
+                        { "label": "Multiple muscles", "nextId": "complex-motility-branch" }
+                    ]
+                },
+                {
+                    "id": "isolated-palsy-branch",
+                    "question": "Which eye shows the primary deficit?",
+                    "category": "cranial-nerve",
+                    "options": [
+                        { "label": "Left Eye", "nextId": "left-eye-position-detail" },
+                        { "label": "Right Eye", "nextId": "right-eye-position-detail" }
+                    ]
+                },
+                {
+                    "id": "left-eye-position-detail",
+                    "question": "Describe the left eye position in primary gaze:",
+                    "category": "position",
+                    "affected_eye": "Left",
+                    "options": [
+                        {
+                            "label": "Down and out position with ptosis",
+                            "icon": "↘️",
+                            "nextId": "left-cn3-evaluation",
+                            "measurements": {
+                                "mid-center-primary": "XT 25Δ, Ht 15Δ"
+                            }
+                        },
+                        {
+                            "label": "Turned inward (esotropic)",
+                            "icon": "↙️",
+                            "nextId": "left-esotropia-evaluation",
+                            "measurements": {
+                                "mid-center-primary": "ET 30Δ"
+                            }
+                        },
+                        {
+                            "label": "Turned outward (exotropic)",
+                            "icon": "↗️",
+                            "nextId": "left-exotropia-evaluation",
+                            "measurements": {
+                                "mid-center-primary": "XT 25Δ"
+                            }
+                        },
+                        {
+                            "label": "Higher than right eye (hypertropic)",
+                            "icon": "⬆️",
+                            "nextId": "left-hypertropia-evaluation",
+                            "measurements": {
+                                "mid-center-primary": "HT 12Δ"
+                            }
+                        },
+                        {
+                            "label": "Variable/alternating position",
+                            "description": "Position changes or alternates",
+                            "nextId": "variable-deviation-evaluation"
+                        }
+                    ]
+                },
+                {
+                    "id": "right-eye-position-detail",
+                    "question": "Describe the right eye position in primary gaze:",
+                    "category": "position",
+                    "affected_eye": "Right",
+                    "options": [
+                        {
+                            "label": "Down and out position with ptosis",
+                            "icon": "↘️",
+                            "nextId": "right-cn3-evaluation",
+                            "measurements": {
+                                "mid-center-primary2": "XT 25Δ, Ht 15Δ"
+                            }
+                        },
+                        {
+                            "label": "Turned inward (esotropic)",
+                            "icon": "↙️",
+                            "nextId": "right-esotropia-evaluation",
+                            "measurements": {
+                                "mid-center-primary2": "ET 30Δ"
+                            }
+                        },
+                        {
+                            "label": "Turned outward (exotropic)",
+                            "icon": "↗️",
+                            "nextId": "right-exotropia-evaluation",
+                            "measurements": {
+                                "mid-center-primary2": "XT 25Δ"
+                            }
+                        },
+                        {
+                            "label": "Higher than left eye (hypertropic)",
+                            "icon": "⬆️",
+                            "nextId": "right-hypertropia-evaluation",
+                            "measurements": {
+                                "mid-center-primary2": "HT 12Δ"
+                            }
+                        },
+                        {
+                            "label": "Variable/alternating position",
+                            "description": "Position changes or alternates",
+                            "nextId": "variable-deviation-evaluation"
+                        }
+                    ]
+                },
+                {
+                    "id": "left-cn3-evaluation",
+                    "question": "Evaluate for Left CN III Palsy:",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Left",
+                    "testing_protocol": [
+                        "Check pupil size and reaction",
+                        "Evaluate ptosis",
+                        "Test all directions of gaze",
+                        "Document limitations"
+                    ],
+                    "options": [
+                        {
+                            "label": "Complete palsy with pupil involvement",
+                            "nextId": "left-cn3-palsy-complete",
+                            "measurements": {
+                                "mid-center-primary": "XT 25Δ, Ht 15Δ",
+                                "up-left-SR": "No elevation",
+                                "mid-left-MR": "No adduction",
+                                "down-left-IR": "No depression"
+                            }
+                        },
+                        {
+                            "label": "Partial palsy with pupil sparing",
+                            "nextId": "left-cn3-palsy-partial",
+                            "measurements": {
+                                "mid-center-primary": "XT 15Δ, Ht 10Δ",
+                                "up-left-SR": "-2 elevation",
+                                "mid-left-MR": "-2 adduction"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "id": "right-cn3-evaluation",
+                    "question": "Evaluate for Right CN III Palsy:",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Right",
+                    "testing_protocol": [
+                        "Check pupil size and reaction",
+                        "Evaluate ptosis",
+                        "Test all directions of gaze",
+                        "Document limitations"
+                    ],
+                    "options": [
+                        {
+                            "label": "Complete palsy with pupil involvement",
+                            "nextId": "right-cn3-palsy-complete",
+                            "measurements": {
+                                "mid-center-primary2": "XT 25Δ, Ht 15Δ",
+                                "up-right-SR": "No elevation",
+                                "mid-right-MR": "No adduction",
+                                "down-right-IR": "No depression"
+                            }
+                        },
+                        {
+                            "label": "Partial palsy with pupil sparing",
+                            "nextId": "right-cn3-palsy-partial",
+                            "measurements": {
+                                "mid-center-primary2": "XT 15Δ, Ht 10Δ",
+                                "up-right-SR": "-2 elevation",
+                                "mid-right-MR": "-2 adduction"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "id": "left-cn3-palsy-complete",
+                    "diagnosis": "Left Cranial Nerve III Palsy (Complete, Pupil-Involving)",
+                    "advice": "URGENT: Possible left posterior communicating artery aneurysm. Need immediate neuroimaging (CTA/MRA). Immediate referral to neurology/neurosurgery.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Left",
+                    "highlight": ["up-left-SR", "mid-left-MR", "down-left-IR"],
+                    "key_features": [
+                        "Left eye: Down and out position in primary gaze",
+                        "Complete left ptosis present",
+                        "Left pupil dilated and poorly reactive (fixed)",
+                        "Left eye severely limited in adduction, elevation, and depression"
+                    ],
+                    "measurements": {
+                        "mid-center-primary": "XT 25Δ, Ht 15Δ",
+                        "up-left-SR": "No elevation",
+                        "mid-left-MR": "No adduction",
+                        "down-left-IR": "No depression"
+                    }
+                },
+                {
+                    "id": "right-cn3-palsy-complete",
+                    "diagnosis": "Right Cranial Nerve III Palsy (Complete, Pupil-Involving)",
+                    "advice": "URGENT: Possible right posterior communicating artery aneurysm. Need immediate neuroimaging (CTA/MRA). Immediate referral to neurology/neurosurgery.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Right",
+                    "highlight": ["up-right-SR", "mid-right-MR", "down-right-IR"],
+                    "key_features": [
+                        "Right eye: Down and out position in primary gaze",
+                        "Complete right ptosis present",
+                        "Right pupil dilated and poorly reactive (fixed)",
+                        "Right eye severely limited in adduction, elevation, and depression"
+                    ],
+                    "measurements": {
+                        "mid-center-primary2": "XT 25Δ, Ht 15Δ",
+                        "up-right-SR": "No elevation",
+                        "mid-right-MR": "No adduction",
+                        "down-right-IR": "No depression"
+                    }
+                },
+                {
+                    "id": "left-cn3-palsy-partial",
+                    "diagnosis": "Left Cranial Nerve III Palsy (Partial, Pupil-Sparing)",
+                    "advice": "Likely microvascular cause. Monitor closely. Consider neuroimaging if no resolution in 3 months or atypical presentation. Refer to neurology.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Left",
+                    "highlight": ["up-left-SR", "mid-left-MR", "down-left-IR"],
+                    "key_features": [
+                        "Left eye: Partial down and out position in primary gaze",
+                        "Partial left ptosis present",
+                        "Left pupil normal size and reactive",
+                        "Left eye partially limited in adduction, elevation, and depression"
+                    ],
+                    "measurements": {
+                        "mid-center-primary": "XT 15Δ, Ht 10Δ",
+                        "up-left-SR": "-2 elevation",
+                        "mid-left-MR": "-2 adduction"
+                    }
+                },
+                {
+                    "id": "right-cn3-palsy-partial",
+                    "diagnosis": "Right Cranial Nerve III Palsy (Partial, Pupil-Sparing)",
+                    "advice": "Likely microvascular cause. Monitor closely. Consider neuroimaging if no resolution in 3 months or atypical presentation. Refer to neurology.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Right",
+                    "highlight": ["up-right-SR", "mid-right-MR", "down-right-IR"],
+                    "key_features": [
+                        "Right eye: Partial down and out position in primary gaze",
+                        "Partial right ptosis present",
+                        "Right pupil normal size and reactive",
+                        "Right eye partially limited in adduction, elevation, and depression"
+                    ],
+                    "measurements": {
+                        "mid-center-primary2": "XT 15Δ, Ht 10Δ",
+                        "up-right-SR": "-2 elevation",
+                        "mid-right-MR": "-2 adduction"
+                    }
+                },
+                {
+                    "id": "left-esotropia-evaluation",
+                    "question": "Is the left esotropia constant or intermittent?",
+                    "category": "comitant",
+                    "affected_eye": "Left",
+                    "options": [
+                        { "label": "Constant Esotropia", "nextId": "left-cn6-palsy" }, /* Assuming CN6 for constant esotropia */
+                        { "label": "Intermittent Esotropia", "nextId": "intermittent-esotropia-detail" }
+                    ]
+                },
+                {
+                    "id": "right-esotropia-evaluation",
+                    "question": "Is the right esotropia constant or intermittent?",
+                    "category": "comitant",
+                    "affected_eye": "Right",
+                    "options": [
+                        { "label": "Constant Esotropia", "nextId": "right-cn6-palsy" },
+                        { "label": "Intermittent Esotropia", "nextId": "intermittent-esotropia-detail" }
+                    ]
+                },
+                {
+                    "id": "left-exotropia-evaluation",
+                    "question": "Is the left exotropia constant or intermittent?",
+                    "category": "comitant",
+                    "affected_eye": "Left",
+                    "options": [
+                        { "label": "Constant Exotropia", "nextId": "left-duane-type2" }, /* Assuming Duane Type 2 for constant exo */
+                        { "label": "Intermittent Exotropia", "nextId": "intermittent-exotropia" }
+                    ]
+                },
+                {
+                    "id": "right-exotropia-evaluation",
+                    "question": "Is the right exotropia constant or intermittent?",
+                    "category": "comitant",
+                    "affected_eye": "Right",
+                    "options": [
+                        { "label": "Constant Exotropia", "nextId": "right-duane-type2" },
+                        { "label": "Intermittent Exotropia", "nextId": "intermittent-exotropia" }
+                    ]
+                },
+                {
+                    "id": "left-hypertropia-evaluation",
+                    "question": "For the left hypertropia, when is the vertical deviation worst?",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Left",
+                    "options": [
+                        {
+                            "label": "Worse on right head tilt (positive Bielschowsky test)",
+                            "nextId": "left-cn4-palsy"
+                        },
+                        {
+                            "label": "Worse in contralateral gaze",
+                            "nextId": "left-brown-syndrome"
+                        },
+                        {
+                            "label": "Variable/inconsistent",
+                            "nextId": "skew-deviation-etiology" /* Re-use existing skew deviation node */
+                        }
+                    ]
+                },
+                {
+                    "id": "right-hypertropia-evaluation",
+                    "question": "For the right hypertropia, when is the vertical deviation worst?",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Right",
+                    "options": [
+                        {
+                            "label": "Worse on left head tilt (positive Bielschowsky test)",
+                            "nextId": "right-cn4-palsy"
+                        },
+                        {
+                            "label": "Worse in contralateral gaze",
+                            "nextId": "right-brown-syndrome"
+                        },
+                        {
+                            "label": "Variable/inconsistent",
+                            "nextId": "skew-deviation-etiology" /* Re-use existing skew deviation node */
+                        }
+                    ]
+                },
+                {
+                    "id": "variable-deviation-evaluation",
+                    "diagnosis": "Variable/Inconsistent Ocular Deviation",
+                    "advice": "Further investigation needed to determine underlying cause. Consider Myasthenia Gravis, functional strabismus, or early/decompensating conditions. Observe for fatiguability.",
+                    "category": "other",
+                    "affected_eye": "Bilateral"
+                },
+                {
+                    "id": "intermittent-esotropia-detail",
+                    "diagnosis": "Intermittent Esotropia",
+                    "advice": "Monitor for frequency and control. May progress to constant. Consider full refractive correction, prisms, or surgery.",
+                    "category": "comitant",
+                    "affected_eye": "Bilateral"
+                },
+                {
+                    "id": "left-cn4-palsy",
+                    "diagnosis": "Left Cranial Nerve IV (Trochlear) Palsy",
+                    "advice": "Left hypertropia worse on right head tilt (positive Bielschowsky test). Consider neuroimaging if new onset, young, or no obvious vascular cause. Treat with prisms if small or surgery if large/symptomatic.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Left",
+                    "highlight": ["down-left-SO"],
+                    "key_features": [
+                        "Left hypertropia in primary position",
+                        "Vertical deviation increases on right head tilt",
+                        "Worse in right gaze and down gaze",
+                        "Patient may have right head tilt (compensatory posture)"
+                    ],
+                    "measurements": {
+                        "mid-center-primary": "HT 12Δ",
+                        "down-left-SO": "HT 15Δ"
+                    }
+                },
+                {
+                    "id": "right-cn4-palsy",
+                    "diagnosis": "Right Cranial Nerve IV (Trochlear) Palsy",
+                    "advice": "Right hypertropia worse on left head tilt (positive Bielschowsky test). Consider neuroimaging if new onset, young, or no obvious vascular cause. Treat with prisms if small or surgery if large/symptomatic.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Right",
+                    "highlight": ["down-right-SO"],
+                    "key_features": [
+                        "Right hypertropia in primary position",
+                        "Vertical deviation increases on left head tilt",
+                        "Worse in left gaze and down gaze",
+                        "Patient may have left head tilt (compensatory posture)"
+                    ],
+                    "measurements": {
+                        "mid-center-primary2": "HT 12Δ",
+                        "down-right-SO": "HT 15Δ"
+                    }
+                },
+                {
+                    "id": "left-cn6-palsy",
+                    "diagnosis": "Left Cranial Nerve VI (Abducens) Palsy",
+                    "advice": "Left esotropia due to lateral rectus weakness. Urgent neuroimaging if new onset, young, or no obvious cause (e.g., diabetes, hypertension). Refer to neurology for evaluation of underlying systemic conditions.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Left",
+                    "highlight": ["mid-left-LR"],
+                    "key_features": [
+                        "Left eye: Esotropic in primary position",
+                        "Limited abduction of left eye",
+                        "Horizontal diplopia worse at distance",
+                        "No pupillary involvement"
+                    ],
+                    "measurements": {
+                        "mid-center-primary": "ET 30Δ",
+                        "mid-left-LR": "No abduction"
+                    }
+                },
+                {
+                    "id": "right-cn6-palsy",
+                    "diagnosis": "Right Cranial Nerve VI (Abducens) Palsy",
+                    "advice": "Right esotropia due to lateral rectus weakness. Urgent neuroimaging if new onset, young, or no obvious cause (e.g., diabetes, hypertension). Refer to neurology for evaluation of underlying systemic conditions.",
+                    "category": "cranial-nerve",
+                    "affected_eye": "Right",
+                    "highlight": ["mid-right-LR"],
+                    "key_features": [
+                        "Right eye: Esotropic in primary position",
+                        "Limited abduction of right eye",
+                        "Horizontal diplopia worse at distance",
+                        "No pupillary involvement"
+                    ],
+                    "measurements": {
+                        "mid-center-primary2": "ET 30Δ",
+                        "mid-right-LR": "No abduction"
+                    }
+                },
+                {
+                    "id": "left-brown-syndrome",
+                    "diagnosis": "Left Brown Syndrome",
+                    "advice": "Left eye elevation deficit worse in adduction. Congenital often improves spontaneously. Acquired may need treatment of underlying inflammation. Surgery if persistent hypotropia in adduction or symptoms.",
+                    "category": "restrictive",
+                    "affected_eye": "Left",
+                    "highlight": ["up-left-IO"],
+                    "key_features": [
+                        "Left eye: Elevation deficit in adduction",
+                        "Positive forced duction test (restricted elevation)",
+                        "No superior oblique overaction"
+                    ],
+                    "measurements": {
+                        "up-left-IO": "No elevation"
+                    }
+                },
+                {
+                    "id": "right-brown-syndrome",
+                    "diagnosis": "Right Brown Syndrome",
+                    "advice": "Right eye elevation deficit worse in adduction. Congenital often improves spontaneously. Acquired may need treatment of underlying inflammation. Surgery if persistent hypotropia in adduction or symptoms.",
+                    "category": "restrictive",
+                    "affected_eye": "Right",
+                    "highlight": ["up-right-IO"],
+                    "key_features": [
+                        "Right eye: Elevation deficit worse in adduction",
+                        "Positive forced duction test (restricted elevation)",
+                        "No superior oblique overaction"
+                    ],
+                    "measurements": {
+                        "up-right-IO": "No elevation"
+                    }
+                },
+                {
+                    "id": "left-duane-type1",
+                    "diagnosis": "Left Duane Retraction Syndrome Type 1",
+                    "advice": "Limited abduction of left eye with globe retraction and narrowing of palpebral fissure on adduction. Manage amblyopia. Surgery primarily for abnormal head posture.",
+                    "category": "congenital",
+                    "affected_eye": "Left",
+                    "highlight": ["mid-left-LR", "mid-left-MR"],
+                    "key_features": [
+                        "Left eye: Limited abduction",
+                        "Globe retraction on adduction",
+                        "Narrowing of palpebral fissure on adduction",
+                        "Upshoot or downshoot in adduction"
+                    ],
+                    "measurements": {
+                        "mid-left-LR": "No abduction",
+                        "mid-left-MR": "Retraction"
+                    }
+                },
+                {
+                    "id": "right-duane-type1",
+                    "diagnosis": "Right Duane Retraction Syndrome Type 1",
+                    "advice": "Limited abduction of right eye with globe retraction and narrowing of palpebral fissure on adduction. Manage amblyopia. Surgery primarily for abnormal head posture.",
+                    "category": "congenital",
+                    "affected_eye": "Right",
+                    "highlight": ["mid-right-LR", "mid-right-MR"],
+                    "key_features": [
+                        "Right eye: Limited abduction",
+                        "Globe retraction on adduction",
+                        "Narrowing of palpebral fissure on adduction",
+                        "Upshoot or downshoot in adduction"
+                    ],
+                    "measurements": {
+                        "mid-right-LR": "No abduction",
+                        "mid-right-MR": "Retraction"
+                    }
+                },
+                {
+                    "id": "left-duane-type2",
+                    "diagnosis": "Left Duane Retraction Syndrome Type 2",
+                    "advice": "Limited adduction of left eye with globe retraction on adduction. Manage amblyopia. Surgery primarily for abnormal head posture.",
+                    "category": "congenital",
+                    "affected_eye": "Left",
+                    "highlight": ["mid-left-MR"],
+                    "key_features": [
+                        "Left eye: Limited adduction",
+                        "Globe retraction on adduction",
+                        "Exotropia in primary gaze (often)"
+                    ],
+                    "measurements": {
+                        "mid-left-MR": "No adduction"
+                    }
+                },
+                {
+                    "id": "right-duane-type2",
+                    "diagnosis": "Right Duane Retraction Syndrome Type 2",
+                    "advice": "Limited adduction of right eye with globe retraction on adduction. Manage amblyopia. Surgery primarily for abnormal head posture.",
+                    "category": "congenital",
+                    "affected_eye": "Right",
+                    "highlight": ["mid-right-MR"],
+                    "key_features": [
+                        "Right eye: Limited adduction",
+                        "Globe retraction on adduction",
+                        "Exotropia in primary gaze (often)"
+                    ],
+                    "measurements": {
+                        "mid-right-MR": "No adduction"
+                    }
+                },
+                {
+                    "id": "left-myasthenia-gravis",
+                    "diagnosis": "Left Ocular Myasthenia Gravis",
+                    "advice": "Variable and fatiguable weakness of left eye muscles, often with ptosis. Refer to neurology for systemic evaluation and treatment. Diagnosis by Ice test, Anti-AChR antibodies, SFEMG.",
+                    "category": "neuromuscular",
+                    "affected_eye": "Left",
+                    "highlight": ["mid-center-primary"],
+                    "key_features": [
+                        "Left eye: Variable and fatiguable ptosis and/or strabismus",
+                        "Worsens with sustained gaze",
+                        "Improves with rest or ice pack test"
+                    ]
+                },
+                {
+                    "id": "right-myasthenia-gravis",
+                    "diagnosis": "Right Ocular Myasthenia Gravis",
+                    "advice": "Variable and fatiguable weakness of right eye muscles, often with ptosis. Refer to neurology for systemic evaluation and treatment. Diagnosis by Ice test, Anti-AChR antibodies, SFEMG.",
+                    "category": "neuromuscular",
+                    "affected_eye": "Right",
+                    "highlight": ["mid-center-primary2"],
+                    "key_features": [
+                        "Right eye: Variable and fatiguable ptosis and/or strabismus",
+                        "Worsens with sustained gaze",
+                        "Improves with rest or ice pack test"
+                    ]
+                },
+                {
+                    "id": "bilateral-cpeo",
+                    "diagnosis": "Bilateral Chronic Progressive External Ophthalmoplegia (CPEO)",
+                    "advice": "Slowly progressive, symmetrical limitation of all eye movements, often with bilateral ptosis. Refer to neurology for evaluation of mitochondrial disorders. Ptosis crutches or surgery for ptosis. Prisms for diplopia (if present).",
+                    "category": "neuromuscular",
+                    "affected_eye": "Bilateral",
+                    "highlight": ["up-left-SR", "up-right-SR", "down-left-IR", "down-right-IR", "mid-left-LR", "mid-right-LR"],
+                    "key_features": [
+                        "Bilateral, symmetrical, slowly progressive ophthalmoplegia",
+                        "Bilateral ptosis (often first symptom)",
+                        "No diplopia (due to slow onset and adaptation)"
+                    ]
+                },
+                {
+                    "id": "left-double-elevator-palsy",
+                    "diagnosis": "Left Double Elevator Palsy",
+                    "advice": "Congenital condition causing inability to elevate the left eye. Manage amblyopia. Surgery may be considered for cosmetic improvement or to expand the field of vision.",
+                    "category": "congenital",
+                    "affected_eye": "Left",
+                    "highlight": ["up-left-SR", "up-left-IO"],
+                    "key_features": [
+                        "Left eye: Complete or partial inability to elevate in all positions of gaze",
+                        "Often associated with hypotropia and ptosis",
+                        "Absence of Bell's phenomenon on affected side"
+                    ],
+                    "measurements": {
+                        "up-left-SR": "No elevation",
+                        "up-left-IO": "No elevation"
+                    }
+                },
+                {
+                    "id": "right-double-elevator-palsy",
+                    "diagnosis": "Right Double Elevator Palsy",
+                    "advice": "Congenital condition causing inability to elevate the right eye. Manage amblyopia. Surgery may be considered for cosmetic improvement or to expand the field of vision.",
+                    "category": "congenital",
+                    "affected_eye": "Right",
+                    "highlight": ["up-right-SR", "up-right-IO"],
+                    "key_features": [
+                        "Right eye: Complete or partial inability to elevate in all positions of gaze",
+                        "Often associated with hypotropia and ptosis",
+                        "Absence of Bell's phenomenon on affected side"
+                    ],
+                    "measurements": {
+                        "up-right-SR": "No elevation",
+                        "up-right-IO": "No elevation"
+                    }
+                },
+                {
+                    "id": "left-monocular-elevation-deficiency",
+                    "diagnosis": "Left Monocular Elevation Deficiency",
+                    "advice": "Similar to double elevator palsy but may have different etiology. Management involves observation and possible surgery.",
+                    "category": "congenital",
+                    "affected_eye": "Left",
+                    "highlight": ["up-left-SR"],
+                    "key_features": [
+                        "Left eye: Isolated limitation of elevation",
+                        "May be due to superior rectus weakness or inferior rectus restriction"
+                    ],
+                    "measurements": {
+                        "up-left-SR": "No elevation"
+                    }
+                },
+                {
+                    "id": "right-monocular-elevation-deficiency",
+                    "diagnosis": "Right Monocular Elevation Deficiency",
+                    "advice": "Similar to double elevator palsy but may have different etiology. Management involves observation and possible surgery.",
+                    "category": "congenital",
+                    "affected_eye": "Right",
+                    "highlight": ["up-right-SR"],
+                    "key_features": [
+                        "Right eye: Isolated limitation of elevation",
+                        "May be due to superior rectus weakness or inferior rectus restriction"
+                    ],
+                    "measurements": {
+                        "up-right-SR": "No elevation"
+                    }
+                },
+                // Existing nodes remain, some might be redirected to new lateralized flows
+                {
+                    "id": "cn-vi-palsy-adult",
+                    "diagnosis": "Cranial Nerve VI Palsy (Adult Acquired) - General",
+                    "advice": "This is a general diagnosis. For specific left/right eye details, please use the lateralized diagnostic path.",
+                    "category": "cranial-nerve",
+                    "highlight": ["mid-left-LR", "mid-right-LR"],
+                    "key_features": ["General abduction deficit"]
+                },
+                {
+                    "id": "cn-iii-palsy-urgent",
+                    "diagnosis": "Cranial Nerve III Palsy (Pupil-Involving) - General",
+                    "advice": "This is a general diagnosis. For specific left/right eye details, please use the lateralized diagnostic path.",
+                    "category": "cranial-nerve",
+                    "highlight": ["up-left-SR", "up-right-SR", "mid-left-MR", "mid-right-MR", "down-left-IR", "down-right-IR"],
+                    "key_features": ["General pupil-involving CN3 features"]
+                },
+                {
+                    "id": "cn-iii-palsy-ischemic",
+                    "diagnosis": "Cranial Nerve III Palsy (Pupil-Sparing, Ischemic) - General",
+                    "advice": "This is a general diagnosis. For specific left/right eye details, please use the lateralized diagnostic path.",
+                    "category": "cranial-nerve",
+                    "highlight": ["up-left-SR", "up-right-SR", "mid-left-MR", "mid-right-MR", "down-left-IR", "down-right-IR"],
+                    "key_features": ["General pupil-sparing ischemic CN3 features"]
+                },
+                {
+                    "id": "cn-iii-palsy-imaging",
+                    "diagnosis": "Cranial Nerve III Palsy (Pupil-Sparing, Requires Imaging) - General",
+                    "advice": "This is a general diagnosis. For specific left/right eye details, please use the lateralized diagnostic path.",
+                    "category": "cranial-nerve",
+                    "highlight": ["up-left-SR", "up-right-SR", "mid-left-MR", "mid-right-MR", "down-left-IR", "down-right-IR"],
+                    "key_features": ["General pupil-sparing CN3 features requiring imaging"]
+                },
+                {
+                    "id": "cn-iv-palsy-adult",
+                    "diagnosis": "Cranial Nerve IV Palsy (Trochlear Nerve, Acquired) - General",
+                    "advice": "This is a general diagnosis. For specific left/right eye details, please use the lateralized diagnostic path.",
+                    "category": "cranial-nerve",
+                    "highlight": ["down-left-SO", "down-right-SO"],
+                    "key_features": ["General CN4 features"]
+                },
+                {
+                    "id": "complex-motility-branch",
+                    "question": "Is the weakness variable or constant?",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Variable (fluctuating/fatigable)", "nextId": "myasthenia-gravis" },
+                        { "label": "Constant with other signs", "nextId": "constant-complex-motility" }
+                    ]
+                },
+                {
+                    "id": "myasthenia-gravis",
+                    "diagnosis": "Myasthenia Gravis - General",
+                    "advice": "This is a general diagnosis. For specific left/right eye details, please use the lateralized diagnostic path.",
+                    "category": "neuromuscular",
+                    "highlight": ["mid-center-primary", "mid-center-primary2"],
+                    "key_features": ["General fatiguable weakness"]
+                },
+                {
+                    "id": "constant-complex-motility",
+                    "question": "What other signs are present with constant complex motility?",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Restrictive myopathy + proptosis/lid signs", "icon": "👀", "nextId": "thyroid-eye-disease-check" },
+                        { "label": "Pain with eye movement, no trauma", "icon": "😖", "nextId": "orbital-myositis" },
+                        { "label": "Adduction deficit + abducting nystagmus", "icon": "↔️👁️", "nextId": "ino" },
+                        { "label": "Vertical deviation not fitting CN IV, with brainstem signs", "icon": "😵", "nextId": "skew-deviation-etiology" },
+                        { "label": "Upgaze palsy + convergence retraction", "icon": "⬆️", "nextId": "parinauds-syndrome" },
+                        { "label": "Chaotic eye movements + myoclonus", "icon": "亂", "nextId": "opsoclonus-myoclonus" },
+                        { "label": "Slowly progressive EOM limitation", "icon": "🐢", "nextId": "cpeo-check" },
+                        { "label": "Globe retraction in adduction", "icon": "👁️", "nextId": "duane-retraction-syndrome" },
+                        { "label": "Fixed restrictive pattern from birth", "icon": "👶", "nextId": "cfeom" }
+                    ]
+                },
+                {
+                    "id": "thyroid-eye-disease-check",
+                    "question": "Which signs are present?",
+                    "category": "restrictive",
+                    "options": [
+                        { "label": "Restrictive myopathy + proptosis/lid signs (Classic TED)", "nextId": "thyroid-eye-disease" },
+                        { "label": "Restriction without obvious signs (Early TED, check TFTs)", "nextId": "thyroid-eye-disease-early" }
+                    ]
+                },
+                {
+                    "id": "thyroid-eye-disease",
+                    "diagnosis": "Thyroid Eye Disease (TED)",
+                    "advice": "Manage thyroid function. Lubrication for exposure. Staging (CAS score) and management based on active/stable phase. Consider IV steroids if active. Muscle surgery after 6 months stability. Refer to endocrinology. Order TFTs, Orbital CT/MRI, TSI antibodies.",
+                    "category": "restrictive"
+                },
+                {
+                    "id": "thyroid-eye-disease-early",
+                    "diagnosis": "Early Thyroid Eye Disease (TED)",
+                    "advice": "Consider TED. Check TFTs (TSH, T3, T4), Orbital CT/MRI, TSI antibodies. Monitor for progression. Refer to endocrinology.",
+                    "category": "restrictive"
+                },
+                {
+                    "id": "ino",
+                    "diagnosis": "Internuclear Ophthalmoplegia (INO)",
+                    "advice": "Adduction deficit + abducting nystagmus. MRI of brainstem (often associated with Multiple Sclerosis). Refer to neurology.",
+                    "category": "supranuclear"
+                },
+                {
+                    "id": "skew-deviation-etiology",
+                    "question": "Is the vertical deviation a Skew Deviation?",
+                    "category": "supranuclear",
+                    "options": [
+                        { "label": "Yes (with brainstem/cerebellar signs)", "icon": "😵", "nextId": "skew-deviation-diagnosis" },
+                        { "label": "Other vertical deviation", "icon": "🤔", "nextId": "other-vertical-motility" }
+                    ]
+                },
+                {
+                    "id": "skew-deviation-diagnosis",
+                    "diagnosis": "Skew Deviation",
+                    "advice": "Comitant vertical deviation. Indicates brainstem or cerebellar lesion (e.g., Hydrocephalus, Arnold-Chiari Malformation, stroke, tumor). Urgent neuroimaging required. Refer to neurology. Usually improves with time.",
+                    "category": "supranuclear"
+                },
+                {
+                    "id": "parinauds-syndrome",
+                    "diagnosis": "Parinaud’s Syndrome / Dorsal Midbrain Syndrome",
+                    "advice": "Upgaze palsy + convergence retraction. Evaluate for pineal tumors, hydrocephalus. Neuroimaging required. Refer to neuro-ophthalmology/neurology.",
+                    "category": "supranuclear"
+                },
+                {
+                    "id": "opsoclonus-myoclonus",
+                    "diagnosis": "Opsoclonus-Myoclonus Syndrome (OMS)",
+                    "advice": "Chaotic eye movements + myoclonus. Rare neurological disorder, often paraneoplastic (neuroblastoma in children) or post-infectious. Urgent referral to neurology/oncology.",
+                    "category": "other"
+                },
+                {
+                    "id": "cpeo-check",
+                    "question": "Are there other signs of systemic involvement (e.g., heart block, ptosis, muscle weakness)?",
+                    "category": "neuromuscular",
+                    "options": [
+                        { "label": "Yes (Kearns-Sayre Syndrome possible)", "icon": "💔", "nextId": "kearns-sayre" },
+                        { "label": "No, isolated progressive EOM paralysis", "icon": "✅", "nextId": "cpeo" }
+                    ]
+                },
+                {
+                    "id": "cpeo",
+                    "diagnosis": "Chronic Progressive External Ophthalmoplegia (CPEO)",
+                    "advice": "Slowly progressive EOM limitation, pure ocular. Refer to neurology for evaluation of mitochondrial disorders. Ptosis crutches or surgery for ptosis. Prisms for diplopia (if present).",
+                    "category": "neuromuscular"
+                },
+                {
+                    "id": "kearns-sayre",
+                    "diagnosis": "Kearns–Sayre Syndrome (KSS)",
+                    "advice": "Systemic mitochondrial disorder with systemic features. Urgent referral to neurology, cardiology (for heart block risk), and endocrinology. Management is multidisciplinary.",
+                    "category": "neuromuscular"
+                },
+                {
+                    "id": "duane-retraction-syndrome",
+                    "diagnosis": "Duane Retraction Syndrome",
+                    "advice": "Globe retraction in adduction. Manage amblyopia. Surgery primarily for abnormal head posture.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "cfeom",
+                    "diagnosis": "Congenital Fibrosis of Extraocular Muscles (CFEOM)",
+                    "advice": "Fixed restrictive pattern from birth. Genetic testing. Multiple surgeries often needed. Prognosis for full movement is limited.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "chronic-congenital-branch",
+                    "question": "Is there mechanical restriction or innervation abnormality?",
+                    "category": "congenital",
+                    "options": [
+                        { "label": "Mechanical", "nextId": "mechanical-restriction-type" },
+                        { "label": "Innervation", "nextId": "innervation-abnormality-type" }
+                    ]
+                },
+                {
+                    "id": "mechanical-restriction-type",
+                    "question": "Which mechanical restriction is present?",
+                    "category": "restrictive",
+                    "options": [
+                        { "label": "Brown Syndrome", "nextId": "brown-syndrome" },
+                        { "label": "CFEOM", "nextId": "cfeom" },
+                        { "label": "Thyroid Eye Disease (TED)", "nextId": "thyroid-eye-disease-check" },
+                        { "label": "Post-traumatic (Orbital Fracture)", "nextId": "orbital-fracture" },
+                        { "label": "Inflammatory (Orbital Myositis)", "nextId": "orbital-myositis" },
+                        { "label": "Post-surgical", "nextId": "iatrogenic-strabismus" },
+                        { "label": "Other restrictive cause", "nextId": "other-restrictive" }
+                    ]
+                },
+                {
+                    "id": "brown-syndrome",
+                    "diagnosis": "Brown Syndrome",
+                    "advice": "Elevation deficit worse in adduction. Congenital often improves spontaneously. Acquired may need treatment of underlying inflammation. Surgery if persistent hypotropia in adduction or symptoms.",
+                    "category": "restrictive"
+                },
+                {
+                    "id": "orbital-fracture",
+                    "diagnosis": "Orbital Fracture / Entrapment",
+                    "advice": "Post-traumatic. CT scan of orbits. Surgical repair may be needed if vision loss, persistent diplopia, or significant enophthalmos. Refer to oculoplastics.",
+                    "category": "restrictive"
+                },
+                {
+                    "id": "innervation-abnormality-type",
+                    "question": "Which innervation abnormality is present?",
+                    "category": "congenital",
+                    "options": [
+                        { "label": "Duane Syndrome", "nextId": "duane-retraction-syndrome" },
+                        { "label": "Congenital Cranial Dysinnervation Disorder (CCDD)", "nextId": "ccdds-general" },
+                        { "label": "Marcus Gunn Jaw-Winking", "nextId": "marcus-gunn" },
+                        { "label": "Congenital CN III Palsy", "nextId": "congenital-cn-iii-palsy" },
+                        { "label": "Congenital CN IV Palsy", "nextId": "congenital-cn-iv-palsy" },
+                        { "label": "Congenital CN VI Palsy (often part of Mobius)", "nextId": "mobius-syndrome" }
+                    ]
+                },
+                {
+                    "id": "ccdds-general",
+                    "diagnosis": "Congenital Cranial Dysinnervation Disorder (General)",
+                    "advice": "Rare complex disorders. Genetic testing may be helpful. Management is individualized, often surgical, for cosmesis and head posture. Refer to specialist.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "congenital-cn-iii-palsy",
+                    "diagnosis": "Congenital Cranial Nerve III Palsy",
+                    "advice": "Evaluate for associated conditions (e.g., ptosis, pupil involvement). Amblyopia management. Surgical intervention for cosmesis and field of vision. Refer to pediatric ophthalmology.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "congenital-cn-iv-palsy",
+                    "diagnosis": "Congenital Cranial Nerve IV Palsy",
+                    "advice": "Often presents with head tilt. May decompensate later in life. Treat with prisms or surgery for vertical deviation. Surgery preferred for larger deviations.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "mobius-syndrome",
+                    "diagnosis": "Mobius Syndrome",
+                    "advice": "Rare congenital neurological disorder (bilateral CN VI and VII palsy). Multidisciplinary management. Surgical options for strabismus and facial reanimation. Refer to neurologist/geneticist.",
+                    "category": "congenital"
+                },
+                {
+                    "id": "motility-assessment",
+                    "question": "Ocular Motility Evaluation",
+                    "category": "motility",
+                    "procedure": [
+                        { "step": "Ductions", "details": ["Test each eye individually", "Nine positions of gaze", "Note any limitations"], "source": "45" },
+                        { "step": "Versions", "details": ["Both eyes together", "Note any incomitance", "Check for patterns"], "source": "46" },
+                        { "step": "Saccades", "details": ["Speed", "Accuracy", "Fatiguability"], "source": "46" }
+                    ],
+                    "options": [
+                        { "label": "Limitations in Ductions (single eye movements)", "icon": "👁️", "nextId": "ductions-check" },
+                        { "label": "Limitations in Versions (both eyes together)", "icon": "👀", "nextId": "versions-check" },
+                        { "label": "Specific Pattern Deviation observed", "icon": "⬆️↗️➡️", "nextId": "pattern-evaluation" },
+                        { "label": "No specific limitation, proceed to Nystagmus Check", "icon": "✅", "nextId": "nystagmus-type-check" }
+                    ]
+                },
+                {
+                    "id": "ductions-check",
+                    "question": "Is there limitation of movement in any direction?",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Abduction deficit", "icon": "⬅️", "nextId": "abduction-deficit-eval" },
+                        { "label": "Adduction deficit", "icon": "➡️", "nextId": "adduction-deficit-eval" },
+                        { "label": "Elevation deficit", "icon": "⬆️", "nextId": "elevation-deficit-eval" },
+                        { "label": "Depression deficit", "icon": "⬇️", "nextId": "depression-deficit-eval" },
+                        { "label": "Multiple directions", "icon": "🔄", "nextId": "multiple-deficits-eval" }
+                    ]
+                },
+                {
+                    "id": "abduction-deficit-eval",
+                    "question": "Characteristics of abduction limitation:",
+                    "category": "motility",
+                    "options": [
+                        {
+                            "label": "Acute onset with diplopia",
+                            "nextId": "isolated-palsy-branch", /* Redirect to lateralized flow */
+                            "tests": ["Forced ductions", "Neuroimaging if indicated", "Vascular risk factors"]
+                        },
+                        {
+                            "label": "Chronic/congenital with globe retraction",
+                            "nextId": "duane-retraction-syndrome",
+                            "tests": ["Forced ductions", "Globe retraction test", "Up/downshoot assessment"]
+                        },
+                        {
+                            "label": "Mechanical restriction",
+                            "nextId": "mechanical-restriction-eval",
+                            "tests": ["Forced ductions", "Orbital imaging", "Thyroid function tests"]
+                        }
+                    ]
+                },
+                {
+                    "id": "adduction-deficit-eval",
+                    "question": "Characteristics of adduction limitation:",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Acute onset, consider CN III Palsy", "nextId": "isolated-palsy-branch" /* Redirect to lateralized flow */ },
+                        { "label": "Associated with abducting nystagmus (INO)", "nextId": "ino" },
+                        { "label": "Chronic/congenital with globe retraction (Duane Syndrome)", "nextId": "duane-retraction-syndrome" },
+                        { "label": "Mechanical restriction", "nextId": "mechanical-restriction-eval" }
+                    ]
+                },
+                {
+                    "id": "elevation-deficit-eval",
+                    "question": "Characteristics of elevation limitation:",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Worse on abduction (Inferior Rectus restriction)", "nextId": "thyroid-eye-disease-check" },
+                        { "label": "Worse on adduction (Brown Syndrome)", "nextId": "isolated-palsy-branch" /* Redirect to lateralized flow */ },
+                        { "label": "Equal in all positions (Double Elevator Palsy)", "nextId": "isolated-palsy-branch" }, /* Redirect to lateralized flow */
+                        { "label": "Acute onset, consider CN III Palsy", "nextId": "isolated-palsy-branch" /* Redirect to lateralized flow */ },
+                        { "label": "Mechanical restriction", "nextId": "mechanical-restriction-eval" }
+                    ]
+                },
+                {
+                    "id": "depression-deficit-eval",
+                    "question": "Characteristics of depression limitation:",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Worse in adduction + head tilt (CN IV Palsy)", "nextId": "isolated-palsy-branch" /* Redirect to lateralized flow */ },
+                        { "label": "Acute onset, consider CN III Palsy", "nextId": "isolated-palsy-branch" /* Redirect to lateralized flow */ },
+                        { "label": "Mechanical restriction", "nextId": "mechanical-restriction-eval" }
+                    ]
+                },
+                {
+                    "id": "multiple-deficits-eval",
+                    "question": "Multiple Deficits Evaluation:",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Variable/fatigable weakness", "nextId": "myasthenia-gravis" },
+                        { "label": "Slowly progressive, chronic", "nextId": "cpeo-check" },
+                        { "label": "Associated with neurological signs", "nextId": "complex-motility-branch" },
+                        { "label": "Generalized mechanical restriction", "nextId": "other-restrictive" }
+                    ]
+                },
+                {
+                    "id": "mechanical-restriction-eval",
+                    "diagnosis": "Mechanical Restriction Suspected",
+                    "advice": "Perform Forced Ductions Test. Consider Orbital imaging (CT/MRI). Evaluate for Thyroid Eye Disease, Orbital Fracture, or other inflammatory/fibrotic conditions.",
+                    "category": "testing"
+                },
+                {
+                    "id": "versions-check",
+                    "question": "Which incomitance pattern is observed in versions?",
+                    "category": "motility",
+                    "options": [
+                        { "label": "Abduction limitation", "icon": "⬅️", "nextId": "isolated-palsy-branch" },
+                        { "label": "Adduction/Elevation/Depression limitation with ptosis/pupil signs", "icon": "👁️", "nextId": "isolated-palsy-branch" },
+                        { "label": "Depression in adduction with head tilt", "icon": "⬇️", "nextId": "isolated-palsy-branch" },
+                        { "label": "Variable/fatigable weakness", "icon": "😴", "nextId": "myasthenia-gravis" },
+                        { "label": "Fixed restriction (post-trauma, TED, CFEOM)", "icon": "⛓️", "nextId": "mechanical-restriction-eval" },
+                        { "label": "Pattern Deviation (A, V, Y)", "icon": "📈", "nextId": "pattern-evaluation" },
+                        { "label": "Nystagmus or other complex neurological signs", "icon": "😵", "nextId": "complex-motility-branch" }
+                    ]
+                },
+                {
+                    "id": "pattern-evaluation",
+                    "question": "What pattern is observed?",
+                    "category": "motility",
+                    "options": [
+                        {
+                            "label": "A-pattern (Divergence in upgaze, convergence in downgaze)",
+                            "description": "Consider Superior Oblique overaction or Inferior Oblique underaction.",
+                            "nextId": "a-pattern-eval"
+                        },
+                        {
+                            "label": "V-pattern (Convergence in upgaze, divergence in downgaze)",
+                            "description": "Consider Inferior Oblique overaction or Superior Oblique underaction.",
+                            "nextId": "v-pattern-eval"
+                        },
+                        {
+                            "label": "Y-pattern (Vertical deviation varies with horizontal gaze)",
+                            "description": "Consider Isolated Superior Oblique overaction or related vertical muscle imbalance.",
+                            "nextId": "y-pattern-eval"
+                        }
+                    ]
+                },
+                {
+                    "id": "a-pattern-eval",
+                    "diagnosis": "A-Pattern Deviation",
+                    "advice": "Often associated with superior oblique overaction. Surgical planning involves horizontal muscle transposition or oblique muscle weakening procedures. Adjust for distance/near.",
+                    "category": "motility"
+                },
+                {
+                    "id": "v-pattern-eval",
+                    "diagnosis": "V-Pattern Deviation",
+                    "advice": "Often associated with inferior oblique overaction. Surgical planning involves horizontal muscle transposition or oblique muscle weakening procedures. Adjust for distance/near.",
+                    "category": "motility"
+                },
+                {
+                    "id": "y-pattern-eval",
+                    "diagnosis": "Y-Pattern Deviation",
+                    "advice": "Typically a variant of A- or V-pattern. Requires careful assessment of oblique muscle function. Surgical planning involves addressing specific muscle imbalances.",
+                    "category": "motility"
+                },
+                {
+                    "id": "forced-ductions-protocol",
+                    "question": "Forced Ductions Test Protocol:",
+                    "category": "testing",
+                    "procedure": [
+                        { "step": "Topical anesthesia", "details": "Apply topical anesthetic drops" },
+                        { "step": "Grasp limbus", "details": "Use forceps at limbus in direction of intended movement" },
+                        { "step": "Gentle rotation", "details": "Attempt to rotate globe in direction of limitation" }
+                    ],
+                    "options": [
+                        { "label": "Free movement (Neurogenic palsy likely)", "icon": "✅", "nextId": "neurogenic-palsy-confirm" },
+                        { "label": "Restriction (Mechanical limitation likely)", "icon": "❌", "nextId": "mechanical-limitation-confirm" }
+                    ]
+                },
+                {
+                    "id": "neurogenic-palsy-confirm",
+                    "diagnosis": "Neurogenic Palsy Confirmed",
+                    "advice": "Forced ductions test confirms free movement. This supports a neurogenic (nerve) cause for the muscle weakness. Proceed with neurological assessment and imaging.",
+                    "category": "testing"
+                },
+                {
+                    "id": "mechanical-limitation-confirm",
+                    "diagnosis": "Mechanical Limitation Confirmed",
+                    "advice": "Forced ductions test confirms restriction. This supports a mechanical cause for the limited eye movement. Proceed with orbital imaging (CT/MRI) and investigate for restrictive conditions like TED, orbital fracture, or CFEOM.",
+                    "category": "testing"
+                },
+                {
+                    "id": "saccadic-velocity-test",
+                    "question": "Saccadic Velocity Test Protocol:",
+                    "category": "testing",
+                    "procedure": [
+                        { "step": "Rapid target movement", "details": "Present targets requiring 20° saccades" },
+                        { "step": "Observe velocity", "details": "Compare velocity in different directions" }
+                    ],
+                    "options": [
+                        { "label": "Slow saccades (Consider myogenic/neurogenic causes)", "icon": "🐢", "nextId": "slow-saccades-interpretation" },
+                        { "label": "Normal velocity (Mechanical restriction more likely)", "icon": "✅", "nextId": "normal-saccades-interpretation" }
+                    ]
+                },
+                {
+                    "id": "slow-saccades-interpretation",
+                    "diagnosis": "Slow Saccades Observed",
+                    "advice": "Suggests myogenic (muscle) or neurogenic (nerve) causes. Further investigation for myasthenia, CPEO, or brainstem lesions is warranted. Consider neurological assessment.",
+                    "category": "testing"
+                },
+                {
+                    "id": "normal-saccades-interpretation",
+                    "diagnosis": "Normal Saccades Observed",
+                    "advice": "Supports a mechanical restriction rather than a primary nerve or muscle issue. Further investigation into restrictive causes (e.g., TED, orbital fracture) is recommended.",
+                    "category": "testing"
+                },
+                {
+                    "id": "cn3-palsy-evaluation-details",
+                    "question": "CN III Palsy Evaluation Details:",
+                    "category": "cranial-nerve",
+                    "assessment": {
+                        "required_testing": [
+                            "Pupil size and reaction",
+                            "Ptosis evaluation",
+                            "Complete motility exam",
+                            "Neuroimaging (urgent if pupil involved)"
+                        ],
+                        "differential_features": [
+                            { "finding": "Pupil-involving", "significance": "Possible aneurysm/compression", "urgency": "IMMEDIATE" },
+                            { "finding": "Pupil-sparing", "significance": "Possible microvascular", "urgency": "Less urgent if isolated" }
+                        ]
+                    },
+                    "options": [
+                        { "label": "Proceed to Diagnosis", "icon": "➡️", "nextId": "isolated-palsy-branch" }
+                    ]
+                },
+                {
+                    "id": "myasthenia-evaluation-details",
+                    "question": "Myasthenia Gravis Evaluation Protocol:",
+                    "category": "neuromuscular",
+                    "testing_protocol": {
+                        "office_tests": [
+                            "Ice test",
+                            "Rest test",
+                            "Sustained upgaze",
+                            "Fatiguability testing"
+                        ],
+                        "laboratory": [
+                            "Anti-AChR antibodies",
+                            "Anti-MuSK antibodies",
+                            "Single fiber EMG if indicated"
+                        ],
+                        "imaging": [
+                            "Chest CT (thymus evaluation)",
+                            "MRI brain if indicated"
+                        ]
+                    },
+                    "options": [
+                        { "label": "Confirm Diagnosis", "icon": "✅", "nextId": "myasthenia-gravis" }
+                    ]
+                },
+                {
+                    "id": "acute-onset-pathway",
+                    "question": "Acute Onset Presentation:",
+                    "category": "urgent",
+                    "red_flags_summary": [
+                        { "symptom": "Diplopia + headache", "urgency": "IMMEDIATE (Possible aneurysm/Temporal arteritis)" },
+                        { "symptom": "Pupil-involving CN3", "urgency": "IMMEDIATE (Possible aneurysm/compression)" },
+                        { "symptom": "Multiple cranial nerves", "urgency": "URGENT (Cavernous sinus workup)" },
+                        { "symptom": "Progressive ophthalmoplegia", "urgency": "URGENT (Cavernous sinus pathology / Myasthenic crisis)" },
+                        { "symptom": "Children with acute strabismus", "urgency": "URGENT (Rule out intracranial / Retinoblastoma)" }
+                    ],
+                    "options": [
+                        { "label": "Sudden onset (<48 hours) with neurological symptoms", "icon": "🧠", "nextId": "neurological-emergency" },
+                        { "label": "Sudden onset (<48 hours), isolated eye movement (Abduction deficit)", "icon": "⬅️", "nextId": "isolated-palsy-branch" },
+                        { "label": "Sudden onset (<48 hours), multiple cranial nerves involved", "icon": "😵", "nextId": "multiple-cn-evaluation" },
+                        { "label": "Variable/fatiguable weakness (Myasthenia crisis)", "icon": "😴", "nextId": "myasthenia-gravis" },
+                        { "label": "Gradual onset (Progressive limitation)", "icon": "🐢", "nextId": "progressive-disorders-branch" },
+                        { "label": "Gradual onset (Intermittent symptoms)", "icon": "🔄", "nextId": "intermittent-strabismus-branch" }
+                    ]
+                },
+                {
+                    "id": "neurological-emergency",
+                    "diagnosis": "Neurological Emergency (e.g., Stroke, Aneurysm)",
+                    "advice": "URGENT: Stroke workup. Brain imaging (MRI/MRA). Neurology referral immediately.",
+                    "category": "urgent"
+                },
+                {
+                    "id": "multiple-cn-evaluation",
+                    "diagnosis": "Multiple Cranial Nerve Palsies",
+                    "advice": "URGENT: Cavernous sinus workup. MRI brain/orbits with contrast. Refer to neuro-ophthalmology/neurology.",
+                    "category": "urgent"
+                },
+                {
+                    "id": "progressive-disorders-branch",
+                    "question": "Pattern of progression:",
+                    "category": "neuromuscular",
+                    "options": [
+                        { "label": "Slowly progressive EOM limitation (Pure ocular)", "nextId": "cpeo" },
+                        { "label": "Slowly progressive EOM limitation (Systemic features)", "nextId": "kearns-sayre" },
+                        { "label": "Variable, fatigable", "nextId": "myasthenia-gravis" }
+                    ]
+                },
+                {
+                    "id": "neurological-assessment",
+                    "category": "neurological",
+                    "question": "Neurological Assessment Considerations:",
+                    "required_testing": {
+                        "immediate": [
+                            "Pupil assessment",
+                            "Visual fields",
+                            "Other cranial nerves",
+                            "Blood pressure"
+                        ],
+                        "imaging": [
+                            { "condition": "CN3 palsy with pupil", "test": "URGENT CTA/MRA" },
+                            { "condition": "Multiple CN palsies", "test": "MRI brain/orbits with contrast" },
+                            { "condition": "INO suspected", "test": "MRI brain with focus on brainstem" },
+                            { "condition": "General acute onset", "test": "MRI brain/orbits with contrast" }
+                        ]
+                    },
+                    "options": [
+                        { "label": "Proceed to Specific Diagnosis", "icon": "➡️", "nextId": "complex-motility-branch" }
+                    ]
+                },
+                {
+                    "id": "other-motility",
+                    "diagnosis": "Other Motility Restriction / Unspecified",
+                    "advice": "Further detailed investigation and differential diagnosis required based on clinical findings (e.g., imaging, neurological workup). Consider tumors (e.g., pontine glioma) or neurofibromatosis as underlying causes.",
+                    "category": "other"
+                },
+                {
+                    "id": "other-restrictive",
+                    "diagnosis": "Other Restrictive Strabismus",
+                    "advice": "Consider chronic inflammation, rare myopathies, or tumors. Further imaging and workup required. Includes causes like post-retinal detachment surgery or scleral buckle.",
+                    "category": "other"
+                },
+                {
+                    "id": "other-vertical-motility",
+                    "diagnosis": "Other Complex Vertical Motility Disorder",
+                    "advice": "Evaluate for saggy eye syndrome, superior oblique myokymia, or other supranuclear/infranuclear causes. Neuro-ophthalmology consultation advised.",
+                    "category": "other"
+                },
+                {
+                    "id": "other-supranuclear",
+                    "diagnosis": "Other Supranuclear Disorder",
+                    "advice": "Complex neurological evaluation required. Consider rarer syndromes or degenerative conditions. Refer to neuro-ophthalmology/neurology.",
+                    "category": "other"
+                }
+            ]
+        };
+
+        let currentNodeId = 'initial-assessment';
+        let history = [];
+
+        // Enhanced eye position definitions with more specific presentations
+        const eyePositions = {
+            horizontal: {
+                "orthotropic": "Aligned",
+                "esotropic": "Turned inward",
+                "exotropic": "Turned outward",
+                "variable": "Alternating/Variable position"
+            },
+            vertical: {
+                "orthotropic": "Level with other eye",
+                "hypertropic": "Higher than other eye",
+                "hypotropic": "Lower than other eye",
+                "variable": "Variable vertical position"
+            },
+            torsional: {
+                "normal": "No torsion",
+                "intorted": "Rotated inward",
+                "extorted": "Rotated outward"
+            },
+            special: {
+                "down-and-out": "Down and outward position (CN III)",
+                "retracted": "Pulled back in adduction (Duane)",
+                "proptotic": "Protruding forward (TED)",
+                "limited-all": "Limited in all directions (CPEO)"
+            }
+        };
+
+        // Enhanced condition-specific eye representations
+        const conditionEyes = {
+            // Cranial Nerve Palsies
+            'left-cn3-palsy-complete': {
+                'mid-center-primary': '👁️', // Right eye normal
+                'mid-center-primary2': '👁️↘️⬇️', // Left eye down and out
+                'up-left-SR': '👁️⬇️', // No elevation
+                'mid-left-MR': '👁️➡️', // No adduction
+                'down-left-IR': '👁️⬆️', // No depression
+                'special-effects': ['ptosis', 'dilated-pupil']
+            },
+            'right-cn3-palsy-complete': {
+                'mid-center-primary': '👁️↘️⬇️', // Right eye down and out
+                'mid-center-primary2': '👁️', // Left eye normal
+                'up-right-SR': '👁️⬇️',
+                'mid-right-MR': '👁️⬅️',
+                'down-right-IR': '👁️⬆️',
+                'special-effects': ['ptosis', 'dilated-pupil']
+            },
+            'left-cn3-palsy-partial': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️↘️',
+                'up-left-SR': '👁️↓',
+                'mid-left-MR': '👁️→',
+                'special-effects': ['partial-ptosis']
+            },
+            'right-cn3-palsy-partial': {
+                'mid-center-primary': '👁️↘️',
+                'mid-center-primary2': '👁️',
+                'up-right-SR': '👁️↓',
+                'mid-right-MR': '👁️←',
+                'special-effects': ['partial-ptosis']
+            },
+            'left-cn4-palsy': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️⬆️',
+                'down-left-SO': '👁️⬆️↻', // Hypertropia with extorsion
+                'special-effects': ['head-tilt-right']
+            },
+            'right-cn4-palsy': {
+                'mid-center-primary': '👁️⬆️',
+                'mid-center-primary2': '👁️',
+                'down-right-SO': '👁️⬆️↺', // Hypertropia with intorsion
+                'special-effects': ['head-tilt-left']
+            },
+            'left-cn6-palsy': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️↙️',
+                'mid-left-LR': '⛔👁️', // No abduction
+                'special-effects': ['face-turn-left']
+            },
+            'right-cn6-palsy': {
+                'mid-center-primary': '👁️↙️',
+                'mid-center-primary2': '👁️',
+                'mid-right-LR': '⛔👁️', // No abduction
+                'special-effects': ['face-turn-right']
+            },
+            // Restrictive Conditions
+            'thyroid-eye-disease': { // Assuming bilateral for general TED
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️',
+                'up-left-SR': '⛔👁️', // Restricted elevation
+                'down-left-IR': '⛔👁️', // Restricted depression
+                'up-right-SR': '⛔👁️',
+                'down-right-IR': '⛔👁️',
+                'special-effects': ['proptosis', 'lid-retraction']
+            },
+            'left-brown-syndrome': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️',
+                'up-left-IO': '⛔👁️', // No elevation in adduction
+                'special-effects': ['mechanical-restriction']
+            },
+            'right-brown-syndrome': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️',
+                'up-right-IO': '⛔👁️', // No elevation in adduction
+                'special-effects': ['mechanical-restriction']
+            },
+            'left-duane-type1': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️↙️',
+                'mid-left-LR': '⛔👁️', // No abduction
+                'mid-left-MR': '👁️↔️', // Retraction on adduction
+                'special-effects': ['globe-retraction', 'upshoot-adduction']
+            },
+            'right-duane-type1': {
+                'mid-center-primary': '👁️↙️',
+                'mid-center-primary2': '👁️',
+                'mid-right-LR': '⛔👁️',
+                'mid-right-MR': '👁️↔️',
+                'special-effects': ['globe-retraction', 'upshoot-adduction']
+            },
+            'left-duane-type2': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️↗️',
+                'mid-left-MR': '⛔👁️', // No adduction
+                'special-effects': ['globe-retraction', 'downshoot-adduction']
+            },
+            'right-duane-type2': {
+                'mid-center-primary': '👁️↗️',
+                'mid-center-primary2': '👁️',
+                'mid-right-MR': '⛔👁️',
+                'special-effects': ['globe-retraction', 'downshoot-adduction']
+            },
+            // Pattern Strabismus (generally bilateral representation)
+            'a-pattern-eval': {
+                'up-left-SR': '👁️↗️',
+                'up-right-SR': '👁️↖️',
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️',
+                'down-left-IR': '👁️↙️',
+                'down-right-IR': '👁️↘️'
+            },
+            'v-pattern-eval': {
+                'up-left-SR': '👁️↙️',
+                'up-right-SR': '👁️↘️',
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️',
+                'down-left-IR': '👁️↗️',
+                'down-right-IR': '👁️↖️'
+            },
+            // Neuromuscular Conditions
+            'myasthenia-gravis': { // General myasthenia
+                'mid-center-primary': '�️↕️↔️',
+                'mid-center-primary2': '👁️↕️↔️',
+                'special-effects': ['fatiguable', 'variable-ptosis']
+            },
+            'left-myasthenia-gravis': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️↕️↔️',
+                'special-effects': ['fatiguable', 'variable-ptosis']
+            },
+            'right-myasthenia-gravis': {
+                'mid-center-primary': '👁️↕️↔️',
+                'mid-center-primary2': '👁️',
+                'special-effects': ['fatiguable', 'variable-ptosis']
+            },
+            'bilateral-cpeo': {
+                'mid-center-primary': '👁️⬇️',
+                'mid-center-primary2': '👁️⬇️',
+                'special-effects': ['progressive-limitation', 'bilateral-ptosis']
+            },
+            // Complex Strabismus
+            'left-double-elevator-palsy': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️⬇️',
+                'up-left-SR': '⛔👁️',
+                'up-left-IO': '⛔👁️',
+                'special-effects': ['ptosis']
+            },
+            'right-double-elevator-palsy': {
+                'mid-center-primary': '👁️⬇️',
+                'mid-center-primary2': '👁️',
+                'up-right-SR': '⛔👁️',
+                'up-right-IO': '⛔👁️',
+                'special-effects': ['ptosis']
+            },
+            'left-monocular-elevation-deficiency': {
+                'mid-center-primary': '👁️',
+                'mid-center-primary2': '👁️⬇️',
+                'up-left-SR': '⛔👁️',
+                'special-effects': ['mechanical-restriction']
+            },
+            'right-monocular-elevation-deficiency': {
+                'mid-center-primary': '👁️⬇️',
+                'mid-center-primary2': '👁️',
+                'up-right-SR': '⛔👁️',
+                'special-effects': ['mechanical-restriction']
+            },
+            'nystagmus-blockage-syndrome': {
+                'mid-center-primary': '↔️👁️',
+                'mid-center-primary2': '↔️👁️',
+                'special-effects': ['nystagmus']
+            },
+            'ino': {
+                'mid-left-MR': '↔️👁️',
+                'mid-right-MR': '↔️👁️',
+                'special-effects': ['nystagmus']
+            },
+            'opsoclonus-myoclonus': {
+                'mid-center-primary': '亂',
+                'mid-center-primary2': '亂',
+                'special-effects': ['nystagmus'] /* Reusing nystagmus animation for chaotic movement */
+            },
+            'orbital-myositis': {
+                'mid-center-primary': '😖👁️',
+                'mid-center-primary2': '😖👁️',
+                'special-effects': ['restricted']
+            },
+            'orbital-fracture': {
+                'mid-center-primary': '🔒👁️',
+                'mid-center-primary2': '🔒👁️',
+                'special-effects': ['mechanical-restriction']
+            },
+            'cfeom': {
+                'mid-center-primary': '🔒👁️',
+                'mid-center-primary2': '🔒👁️',
+                'special-effects': ['mechanical-restriction']
+            },
+            'skew-deviation-etiology': {
+                'mid-center-primary': '👁️↕️',
+                'mid-center-primary2': '👁️↕️',
+            },
+            'functional-strabismus': {
+                'mid-center-primary': '👁️❓',
+                'mid-center-primary2': '👁️❓',
+            },
+            'acute-comitant': {
+                'mid-center-primary': '👁️↔️',
+                'mid-center-primary2': '👁️↔️',
+            },
+            'decompensated-phoria': {
+                'mid-center-primary': '👁️↔️',
+                'mid-center-primary2': '👁️↔️',
+            },
+            'intermittent-exotropia': {
+                'mid-center-primary': '↔️',
+                'mid-center-primary2': '↔️',
+            },
+            'intermittent-exotropia-poor-control': {
+                'mid-center-primary': '↔️',
+                'mid-center-primary2': '↔️',
+            },
+            'convergence-insufficiency': {
+                'mid-center-primary': '👁️➡️',
+                'mid-center-primary2': '👁️⬅️',
+            },
+            'intermittent-esotropia-detail': {
+                'mid-center-primary': '↔️',
+                'mid-center-primary2': '↔️',
+            }
+        };
+
+        const gazePositions = [
+            // Row 1 (Up)
+            { id: 'up-left-SR', label: '👁️', muscle: 'SR', conditions: {} },
+            { id: 'up-left-IO', label: '👁️', muscle: 'IO', conditions: {} },
+            { id: 'up-center-SR-IO', label: '👁️', muscle: 'SR+IO', conditions: {} },
+            { id: 'up-center-SR-IO2', label: '👁️', muscle: 'SR+IO', conditions: {} },
+            { id: 'up-right-IO', label: '👁️', muscle: 'IO', conditions: {} },
+            { id: 'up-right-SR', label: '👁️', muscle: 'SR', conditions: {} },
+
+            // Row 2 (Horizontal)
+            { id: 'mid-left-LR', label: '👁️', muscle: 'LR', conditions: {} },
+            { id: 'mid-left-MR', label: '👁️', muscle: 'MR', conditions: {} },
+            { id: 'mid-center-primary', label: '👁️', muscle: '', conditions: {} },
+            { id: 'mid-center-primary2', label: '👁️', muscle: '', conditions: {} },
+            { id: 'mid-right-MR', label: '👁️', muscle: 'MR', conditions: {} },
+            { id: 'mid-right-LR', label: '👁️', muscle: 'LR', conditions: {} },
+
+            // Row 3 (Down)
+            { id: 'down-left-IR', label: '👁️', muscle: 'IR', conditions: {} },
+            { id: 'down-left-SO', label: '👁️', muscle: 'SO', conditions: {} },
+            { id: 'down-center-IR-SO', label: '👁️', muscle: 'IR+SO', conditions: {} },
+            { id: 'down-center-IR-SO2', label: '👁️', muscle: 'IR+SO', conditions: {} },
+            { id: 'down-right-SO', label: '👁️', muscle: 'SO', conditions: {} },
+            { id: 'down-right-IR', label: '👁️', muscle: 'IR', conditions: {} }
+        ];
+
+        // Populate conditions from conditionEyes into gazePositions
+        for (const conditionNodeId in conditionEyes) {
+            for (const gazePosId in conditionEyes[conditionNodeId]) {
+                const gazePos = gazePositions.find(p => p.id === gazePosId);
+                if (gazePos) {
+                    gazePos.conditions[conditionNodeId] = conditionEyes[conditionNodeId][gazePosId];
+                }
+            }
+        }
+
+        function renderGazeGrid(highlights = [], conditionId = null, affectedEye = null, measurements = null) {
+            const gazeGridWrapper = document.getElementById('gazeGridWrapper');
+            const gazeGridContent = document.getElementById('gazeGridContent'); // The actual grid div
+            const conditionHeaderDiv = document.getElementById('conditionHeader');
+            const affectedEyeDisplay = document.getElementById('affectedEyeDisplay');
+            const measurementLegendDiv = document.getElementById('measurementLegend');
+
+            // Clear previous content from the actual grid and reset classes
+            gazeGridContent.innerHTML = '';
+            gazeGridContent.classList.remove('fatiguable', 'nystagmus'); // Clear container-level animations
+
+            // Set affected eye display
+            affectedEyeDisplay.textContent = affectedEye ? `Affected Eye: ${affectedEye}` : 'Bilateral';
+            conditionHeaderDiv.style.display = 'block'; // Always show header for gaze grid
+
+
+            gazePositions.forEach(pos => {
+                const div = document.createElement('div');
+                div.className = `gaze-position ${highlights.includes(pos.id) ? 'highlight' : ''}`;
+                div.setAttribute('data-muscle', pos.muscle);
+
+                const eyeIcon = document.createElement('span');
+                eyeIcon.className = 'eye-icon';
+                eyeIcon.textContent = pos.label; // Default icon
+
+                // Apply condition-specific icon if available
+                if (conditionId && conditionEyes[conditionId] && conditionEyes[conditionId][pos.id]) {
+                    eyeIcon.textContent = conditionEyes[conditionId][pos.id];
+                }
+
+                div.appendChild(eyeIcon);
+
+                // Add measurement overlay if available
+                if (measurements && measurements[pos.id]) {
+                    const measureDiv = document.createElement('div');
+                    measureDiv.className = 'measurement-overlay';
+                    measureDiv.textContent = measurements[pos.id];
+                    div.appendChild(measureDiv);
+                }
+
+                // Add muscle labels
+                if (pos.muscle) {
+                    const muscleLabel = document.createElement('div');
+                    muscleLabel.className = 'muscle-label';
+                    muscleLabel.textContent = pos.muscle;
+                    div.appendChild(muscleLabel);
+                }
+                gazeGridContent.appendChild(div); // Append to gazeGridContent, not gazeGridContainer
+
+                // Apply special effects to the individual eyeIcon span based on condition
+                if (conditionId && conditionEyes[conditionId] && conditionEyes[conditionId]['special-effects']) {
+                    conditionEyes[conditionId]['special-effects'].forEach(effect => {
+                        const isLeftEyePos = pos.id.includes('left');
+                        const isRightEyePos = pos.id.includes('right');
+                        const isCenterPos = pos.id.includes('center');
+
+                        if (
+                            (affectedEye === 'Left' && (isLeftEyePos || isCenterPos)) ||
+                            (affectedEye === 'Right' && (isRightEyePos || isCenterPos)) ||
+                            (affectedEye === 'Bilateral') ||
+                            (!affectedEye && (isLeftEyePos || isRightEyePos || isCenterPos))
+                        ) {
+                            if (effect.includes('ptosis') || effect.includes('pupil') || effect.includes('restricted') || effect.includes('retraction') || effect.includes('proptosis') || effect.includes('mechanical-restriction')) {
+                                eyeIcon.classList.add(effect);
+                            }
+                        }
+                        if (effect.includes('head-tilt') || effect.includes('face-turn')) {
+                            div.classList.add(effect);
+                        }
+                    });
+                }
+            });
+
+            // Apply global animations to the gazeGridContent (the actual grid)
+            if (conditionId && conditionEyes[conditionId] && conditionEyes[conditionId]['special-effects']) {
+                conditionEyes[conditionId]['special-effects'].forEach(effect => {
+                    if (effect === 'fatiguable') {
+                        gazeGridContent.classList.add('fatiguable');
+                    } else if (effect === 'nystagmus') {
+                        gazeGridContent.classList.add('nystagmus');
+                    }
+                });
+            }
+
+            // Set measurement legend visibility and content
+            if (measurements) {
+                measurementLegendDiv.innerHTML = `
+                    <div class="legend-title">Measurements (Prism Diopters)</div>
+                    <div class="legend-item">ET: Esotropia</div>
+                    <div class="legend-item">XT: Exotropia</div>
+                    <div class="legend-item">HT: Hypertropia</div>
+                    <div class="legend-item">Ht: Hypotropia</div>
+                    <div class="legend-item">⛔: No movement</div>
+                    <div class="legend-item">↓: Reduced movement</div>
+                `;
+                measurementLegendDiv.style.display = 'block';
+            } else {
+                measurementLegendDiv.style.display = 'none';
+            }
+
+            // Ensure the main wrapper is visible if content is being rendered
+            gazeGridWrapper.style.display = 'block';
+        }
+
+        function showQuestion(nodeId, loadedHistory = null) {
+            const node = diagnosticTree.nodes.find(n => n.id === nodeId);
+            if (!node) {
+                console.error("Node not found:", nodeId);
+                return;
+            }
+
+            const questionContainer = document.getElementById('questionContainer');
+            const optionsContainer = document.getElementById('optionsContainer');
+            const diagnosisContainer = document.getElementById('diagnosisContainer');
+            const resetButton = document.getElementById('resetButton');
+            const backButton = document.getElementById('backButton');
+            const historyPanel = document.getElementById('historyPanel');
+            const pdfSummarySection = document.getElementById('pdfSummarySection');
+            const gazeGridWrapper = document.getElementById('gazeGridWrapper'); // Get the wrapper
+
+            questionContainer.innerHTML = node.question;
+            optionsContainer.innerHTML = '';
+            diagnosisContainer.style.display = 'none';
+            resetButton.style.display = 'none';
+            pdfSummarySection.style.display = 'none';
+            gazeGridWrapper.style.display = 'none'; // Hide wrapper by default, show if needed
+
+            if (loadedHistory) {
+                history = loadedHistory;
+            }
+
+            backButton.style.display = history.length > 0 ? 'block' : 'none';
+
+            if (node.options) {
+                optionsContainer.style.display = 'flex';
+                node.options.forEach(option => {
+                    const button = document.createElement('button');
+                    button.className = 'option-button';
+                    button.innerHTML = `${option.icon || ''} ${option.label}`;
+                    button.onclick = () => handleOption(option);
+                    optionsContainer.appendChild(button);
+                });
+            } else {
+                optionsContainer.style.display = 'none';
+            }
+
+            if (node.procedure) {
+                const procedureList = document.createElement('ul');
+                procedureList.className = 'procedure-list';
+                node.procedure.forEach(proc => {
+                    const listItem = document.createElement('li');
+                    listItem.innerHTML = `<strong>${proc.step}</strong> ${proc.details ? `- ${proc.details.join(', ')}` : ''} ${proc.source ? `[cite: ${proc.source}]` : ''}`;
+                    procedureList.appendChild(listItem);
+                });
+                questionContainer.appendChild(procedureList);
+            }
+
+            if (node.assessment || node.testing_protocol || node.red_flags_summary) {
+                const detailsContainer = document.createElement('div');
+                detailsContainer.className = 'testing-details';
+                let htmlContent = '';
+
+                if (node.red_flags_summary) {
+                    htmlContent += '<h4>Red Flags Summary:</h4><ul>';
+                    node.red_flags_summary.forEach(item => {
+                        htmlContent += `<li><strong>${item.symptom}</strong> - <span style="color: ${item.urgency.includes('IMMEDIATE') ? 'red' : 'orange'};">${item.urgency}</span></li>`;
+                    });
+                    htmlContent += '</ul>';
+                }
+
+                if (node.assessment && node.assessment.required_testing) {
+                    htmlContent += '<h4>Required Testing:</h4><ul>';
+                    node.assessment.required_testing.forEach(item => {
+                        if (typeof item === 'string') {
+                            htmlContent += `<li>${item}</li>`;
+                        } else if (item.condition) {
+                            htmlContent += `<li><strong>Condition:</strong> ${item.condition} - <strong>Test:</strong> ${item.test}</li>`;
+                        }
+                    });
+                    htmlContent += '</ul>';
+                }
+
+                if (node.testing_protocol) {
+                    for (const key in node.testing_protocol) {
+                        htmlContent += `<h4>${key.replace(/_/g, ' ')}:</h4><ul>`;
+                        node.testing_protocol[key].forEach(item => {
+                            htmlContent += `<li>${item}</li>`;
+                        });
+                        htmlContent += '</ul>';
+                    }
+                }
+                detailsContainer.innerHTML += htmlContent;
+                questionContainer.appendChild(detailsContainer);
+            }
+
+            if (node.diagnosis) {
+                showDiagnosis(node);
+                optionsContainer.style.display = 'none';
+                resetButton.style.display = 'block';
+                backButton.style.display = 'none';
+                pdfSummarySection.style.display = 'block';
+                historyPanel.style.display = 'block';
+            } else {
+                historyPanel.style.display = 'block';
+            }
+            // Always render the gaze grid if a node is displayed, even if it's just the default '👁️'
+            renderGazeGrid(node.highlight || [], nodeId, node.affected_eye, node.measurements);
+            gazeGridWrapper.style.display = 'block'; // Ensure the wrapper is visible
+            updateHistoryDisplay();
+        }
+
+        function handleOption(option) {
+            const currentQuestionNode = diagnosticTree.nodes.find(n => n.id === currentNodeId);
+            history.push({
+                nodeId: currentNodeId,
+                question: currentQuestionNode.question,
+                answer: option.label
+            });
+            currentNodeId = option.nextId;
+            showQuestion(currentNodeId);
+        }
+
+        function showDiagnosis(node) {
+            const diagnosisContainer = document.getElementById('diagnosisContainer');
+            diagnosisContainer.style.display = 'block';
+            let diagnosisHtml = `
+                <h3>Diagnosis:</h3>
+                <p><strong>${node.diagnosis}</strong></p>
+                <p><strong>Advice:</strong> ${node.advice}</p>
+            `;
+
+            if (node.key_features && node.key_features.length > 0) {
+                diagnosisHtml += `
+                    <h4>Key Differentiating Features:</h4>
+                    <ul class="procedure-list">
+                        ${node.key_features.map(feature => `<li>${feature}</li>`).join('')}
+                    </ul>
+                `;
+            }
+
+            diagnosisHtml += `${node.category === 'urgent' ? '<div class="urgent">URGENT: Immediate referral required</div>' : ''}
+                <div id="printableSummaryContent" class="printable-summary" style="display: none;"></div>
+            `;
+            diagnosisContainer.innerHTML = diagnosisHtml;
+        }
+
+        function updateHistoryDisplay() {
+            const historyContainer = document.getElementById('historyContainer');
+            historyContainer.innerHTML = history.map(item =>
+                `<div class="history-item"><strong>Q:</strong> ${item.question}<br><strong>A:</strong> ${item.answer}</div>`
+            ).join('');
+        }
+
+        function goBack() {
+            if (history.length > 0) {
+                const lastState = history.pop();
+                currentNodeId = lastState.nodeId;
+                showQuestion(currentNodeId);
+            }
+        }
+
+        function resetDiagnostic() {
+            currentNodeId = 'initial-assessment';
+            history = [];
+            document.getElementById('diagnosisContainer').style.display = 'none';
+            document.getElementById('resetButton').style.display = 'none';
+            document.getElementById('backButton').style.display = 'none';
+            document.getElementById('historyContainer').innerHTML = '';
+            document.getElementById('pdfSummarySection').style.display = 'none';
+            document.getElementById('savedDiagnosesList').innerHTML = '';
+            document.getElementById('gazeGridWrapper').style.display = 'none'; // Hide the entire gaze grid wrapper on reset
+
+            document.getElementById('patientNameInput').value = '';
+            document.getElementById('patientIdInput').value = '';
+            document.getElementById('clinicianNameInput').value = '';
+            document.getElementById('signatureInput').value = '';
+            showQuestion(currentNodeId);
+        }
+
+        async function downloadPdfSummary() {
+            const patientName = document.getElementById('patientNameInput').value || 'N/A';
+            const patientId = document.getElementById('patientIdInput').value || 'N/A';
+            const clinicianName = document.getElementById('clinicianNameInput').value || 'N/A';
+            const signature = document.getElementById('signatureInput').value || 'N/A';
+
+            const node = diagnosticTree.nodes.find(n => n.id === currentNodeId);
+            const diagnosisText = node.diagnosis;
+            const adviceText = node.advice;
+            const highlights = node.highlight || [];
+            const keyFeatures = node.key_features || [];
+            const affectedEye = node.affected_eye || null;
+            const measurements = node.measurements || null;
+
+            const printableSummaryContent = document.getElementById('printableSummaryContent');
+            printableSummaryContent.style.display = 'block';
+
+            const historyHtml = history.map(item =>
+                `<p><strong>Q:</strong> ${item.question}<br><strong>A:</strong> ${item.answer}</p>`
+            ).join('');
+
+            // Re-generate the gaze grid HTML for the PDF with inline styles
+            let gazeGridHtml = `<div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin-top: 15px; border: 1px solid #ccc; padding: 5px; border-radius: 8px; background-color: white;">`;
+            gazePositions.forEach(pos => {
+                const isHighlighted = highlights.includes(pos.id);
+                const bgColor = isHighlighted ? '#ffe082' : '#f0f0f0';
+                const borderColor = isHighlighted ? '#ffb300' : '#f0f0f0';
+                const fontWeight = isHighlighted ? 'bold' : 'normal';
+                const primaryBg = pos.muscle === '' ? '#e3f2fd' : bgColor;
+
+                let eyeIconContent = pos.label;
+                if (node.id && conditionEyes[node.id] && conditionEyes[node.id][pos.id]) {
+                    eyeIconContent = conditionEyes[node.id][pos.id];
+                }
+
+                let specialEffectClasses = '';
+                if (node.id && conditionEyes[node.id] && conditionEyes[node.id]['special-effects']) {
+                    conditionEyes[node.id]['special-effects'].forEach(effect => {
+                        const isLeftEyePos = pos.id.includes('left');
+                        const isRightEyePos = pos.id.includes('right');
+                        const isCenterPos = pos.id.includes('center');
+
+                        if (
+                            (affectedEye === 'Left' && (isLeftEyePos || isCenterPos)) ||
+                            (affectedEye === 'Right' && (isRightEyePos || isCenterPos)) ||
+                            (affectedEye === 'Bilateral') ||
+                            (!affectedEye && (isLeftEyePos || isRightEyePos || isCenterPos))
+                        ) {
+                            if (effect.includes('ptosis') || effect.includes('pupil') || effect.includes('restricted') || effect.includes('retraction') || effect.includes('proptosis') || effect.includes('mechanical-restriction')) {
+                                specialEffectClasses += ` ${effect}`;
+                            }
+                        }
+                        if (effect.includes('head-tilt') || effect.includes('face-turn')) {
+                            specialEffectClasses += ` ${effect}`;
+                        }
+                    });
+                }
+
+                gazeGridHtml += `
+                    <div style="padding: 8px; background-color: ${primaryBg}; border-radius: 4px; text-align: center; font-size: 1.2em; position: relative; border: 1px solid ${borderColor}; font-weight: ${fontWeight};">
+                        <span class="eye-icon ${specialEffectClasses}">${eyeIconContent}</span>
+                        ${pos.muscle ? `<span style="font-size: 0.7em; position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); color: #666; white-space: nowrap;">${pos.muscle}</span>` : ''}
+                        ${measurements && measurements[pos.id] ? `<div style="position: absolute; bottom: 0; left: 0; right: 0; text-align: center; font-size: 0.7em; color: #333; background: rgba(255,255,255,0.7); padding: 2px 0; border-top: 1px solid #eee;">${measurements[pos.id]}</div>` : ''}
+                    </div>
+                `;
+            });
+            gazeGridHtml += '</div>';
+
+            let keyFeaturesHtml = '';
+            if (keyFeatures.length > 0) {
+                keyFeaturesHtml = `
+                    <h4 style="font-size: 1.2em; margin-top: 20px;">Key Differentiating Features:</h4>
+                    <ul style="list-style-type: disc; padding-left: 20px; margin-top: 10px;">
+                        ${keyFeatures.map(feature => `<li>${feature}</li>`).join('')}
+                    </ul>
+                `;
+            }
+
+            let measurementLegendHtml = '';
+            if (measurements) {
+                measurementLegendHtml = `
+                    <div style="margin-top: 15px; padding: 10px; background: #f8f9fa; border-radius: 4px; font-size: 0.9em; border: 1px solid #eee;">
+                        <div style="font-weight: bold; margin-bottom: 5px; color: var(--primary-color);">Measurements (Prism Diopters)</div>
+                        <div style="display: inline-block; margin-right: 15px; color: #666;">ET: Esotropia</div>
+                        <div style="display: inline-block; margin-right: 15px; color: #666;">XT: Exotropia</div>
+                        <div style="display: inline-block; margin-right: 15px; color: #666;">HT: Hypertropia</div>
+                        <div style="display: inline-block; margin-right: 15px; color: #666;">Ht: Hypotropia</div>
+                        <div style="display: inline-block; margin-right: 15px; color: #666;">⛔: No movement</div>
+                        <div style="display: inline-block; margin-right: 15px; color: #666;">↓: Reduced movement</div>
+                    </div>
+                `;
+            }
+
+            printableSummaryContent.innerHTML = `
+                <h4 style="text-align: center; font-size: 1.5em; margin-bottom: 20px;">Binocular Vision Diagnosis Summary</h4>
+                <p><strong>Patient Name:</strong> ${patientName}</p>
+                <p><strong>Patient ID:</strong> ${patientId}</p>
+                <p><strong>Date:</strong> ${new Date().toLocaleString()}</p>
+                <hr style="border: 0; height: 1px; background: #ccc; margin: 15px 0;">
+                <h4 style="font-size: 1.2em;">Diagnosis:</h4>
+                <p style="font-size: 1.1em; font-weight: bold;">${diagnosisText}</p>
+                <p><strong>Advice:</strong> ${adviceText}</p>
+                ${keyFeaturesHtml}
+                ${node.category === 'urgent' ? '<p style="background-color: #e74c3c; color: white; padding: 8px; border-radius: 4px; text-align: center; font-weight: bold;">URGENT: Immediate referral required</p>' : ''}
+                <h4 style="font-size: 1.2em; margin-top: 20px;">Gaze Affected:</h4>
+                <div style="text-align: center; font-weight: bold; color: var(--primary-color); margin-bottom: 10px; padding: 5px; background-color: #e9ecef; border-radius: 4px;">Affected Eye: ${affectedEye ? affectedEye : 'Bilateral'}</div>
+                ${gazeGridHtml}
+                ${measurementLegendHtml}
+                <h4 style="font-size: 1.2em; margin-top: 20px;">Diagnostic Path:</h4>
+                <div style="background-color: #f8f8f8; padding: 10px; border-radius: 5px; border: 1px solid #eee;">
+                    ${historyHtml}
+                </div>
+                <hr style="border: 0; height: 1px; background: #ccc; margin: 15px 0;">
+                <p style="text-align: right; margin-top: 20px;"><strong>Clinician:</strong> ${clinicianName}</p>
+                <p style="text-align: right;"><strong>Signature:</strong> ${signature}</p>
+            `;
+
+            const canvas = await html2canvas(printableSummaryContent, {
+                scale: 2,
+                useCORS: true,
+                logging: false
+            });
+
+            printableSummaryContent.style.display = 'none';
+
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF('p', 'mm', 'a4');
+
+            const imgData = canvas.toDataURL('image/png');
+            const imgProps = pdf.getImageProperties(imgData);
+            const pdfWidth = pdf.internal.pageSize.getWidth();
+            const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+
+            pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+
+            pdf.save(`Binocular_Vision_Diagnosis_${patientName.replace(/\s/g, '_') || 'Summary'}.pdf`);
+        }
+
+        async function saveCurrentDiagnosis() {
+            if (!window.isAuthReady || !window.db || !window.userId) {
+                console.error("Firebase not initialized or user not authenticated.");
+                return;
+            }
+
+            const patientName = document.getElementById('patientNameInput').value;
+            const patientId = document.getElementById('patientIdInput').value;
+            const clinicianName = document.getElementById('clinicianNameInput').value;
+            const signature = document.getElementById('signatureInput').value;
+
+            if (!patientName || !patientId) {
+                alert("Please enter Patient Name and Patient ID to save the diagnosis.");
+                return;
+            }
+
+            const node = diagnosticTree.nodes.find(n => n.id === currentNodeId);
+            if (!node || !node.diagnosis) {
+                alert("No complete diagnosis to save. Please complete the diagnostic flow.");
+                return;
+            }
+
+            const diagnosisData = {
+                timestamp: new Date().toISOString(),
+                patientName: patientName,
+                patientId: patientId,
+                clinicianName: clinicianName,
+                signature: signature,
+                currentDiagnosisNodeId: currentNodeId,
+                history: JSON.stringify(history),
+                gazeHighlights: node.highlight || [],
+                diagnosisText: node.diagnosis,
+                adviceText: node.advice,
+                category: node.category,
+                keyFeatures: node.key_features || [],
+                affectedEye: node.affected_eye || null,
+                measurements: node.measurements || null
+            };
+
+            try {
+                const docRef = await window.firestore.addDoc(window.firestore.collection(window.db, `artifacts/${__app_id}/users/${window.userId}/diagnoses`), diagnosisData);
+                console.log("Diagnosis saved with ID:", docRef.id);
+                alert("Diagnosis saved successfully!");
+                loadSavedDiagnosesList();
+            } catch (e) {
+                console.error("Error saving diagnosis:", e);
+                alert("Error saving diagnosis. Please try again.");
+            }
+        }
+
+        async function loadSavedDiagnosesList() {
+            if (!window.isAuthReady || !window.db || !window.userId) {
+                console.warn("Firebase not ready to load diagnoses.");
+                return;
+            }
+
+            const savedDiagnosesList = document.getElementById('savedDiagnosesList');
+            savedDiagnosesList.innerHTML = '<li>Loading...</li>';
+
+            try {
+                const q = window.firestore.query(window.firestore.collection(window.db, `artifacts/${__app_id}/users/${window.userId}/diagnoses`));
+                const querySnapshot = await window.firestore.getDocs(q);
+                savedDiagnosesList.innerHTML = '';
+
+                if (querySnapshot.empty) {
+                    savedDiagnosesList.innerHTML = '<li>No saved diagnoses found.</li>';
+                    return;
+                }
+
+                querySnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const listItem = document.createElement('li');
+                    listItem.innerHTML = `
+                        <span>${data.patientName} (${data.patientId}) - ${new Date(data.timestamp).toLocaleDateString()}</span>
+                        <div>
+                            <button class="load-btn" data-id="${doc.id}">Load</button>
+                            <button class="delete-btn" data-id="${doc.id}">Delete</button>
+                        </div>
+                    `;
+                    savedDiagnosesList.appendChild(listItem);
+                });
+
+                savedDiagnosesList.querySelectorAll('.load-btn').forEach(button => {
+                    button.onclick = (event) => loadDiagnosis(event.target.dataset.id);
+                });
+                savedDiagnosesList.querySelectorAll('.delete-btn').forEach(button => {
+                    button.onclick = (event) => deleteDiagnosis(event.target.dataset.id);
+                });
+
+            } catch (e) {
+                console.error("Error loading diagnoses list:", e);
+                savedDiagnosesList.innerHTML = '<li>Error loading diagnoses.</li>';
+            }
+        }
+
+        async function loadDiagnosis(docId) {
+            if (!window.isAuthReady || !window.db || !window.userId) {
+                console.error("Firebase not initialized or user not authenticated.");
+                return;
+            }
+
+            try {
+                const docRef = window.firestore.doc(window.db, `artifacts/${__app_id}/users/${window.userId}/diagnoses`, docId);
+                const docSnap = await window.firestore.getDoc(docRef);
+
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    document.getElementById('patientNameInput').value = data.patientName || '';
+                    document.getElementById('patientIdInput').value = data.patientId || '';
+                    document.getElementById('clinicianNameInput').value = data.clinicianName || '';
+                    document.getElementById('signatureInput').value = data.signature || '';
+
+                    const loadedHistory = JSON.parse(data.history || '[]');
+                    currentNodeId = data.currentDiagnosisNodeId;
+                    showQuestion(currentNodeId, loadedHistory);
+                    alert(`Diagnosis for ${data.patientName} loaded successfully!`);
+                } else {
+                    alert("No such diagnosis found!");
+                }
+            } catch (e) {
+                console.error("Error loading diagnosis:", e);
+                alert("Error loading diagnosis. Please try again.");
+            }
+        }
+
+        async function deleteDiagnosis(docId) {
+            if (!window.isAuthReady || !window.db || !window.userId) {
+                console.error("Firebase not initialized or user not authenticated.");
+                return;
+            }
+
+            const confirmDelete = true;
+            if (confirmDelete) {
+                try {
+                    await window.firestore.deleteDoc(window.firestore.doc(window.db, `artifacts/${__app_id}/users/${window.userId}/diagnoses`, docId));
+                    console.log("Diagnosis deleted successfully:", docId);
+                    alert("Diagnosis deleted successfully!");
+                    loadSavedDiagnosesList();
+                    const currentDiagnosisNode = diagnosticTree.nodes.find(n => n.id === currentNodeId);
+                    if (currentDiagnosisNode && currentDiagnosisNode.diagnosis && currentDiagnosisNode.id === docId) {
+                        resetDiagnostic();
+                    }
+                } catch (e) {
+                    console.error("Error deleting diagnosis:", e);
+                    alert("Error deleting diagnosis. Please try again.");
+                }
+            }
+        }
+
+        function showLoadDiagnosisPanel() {
+            loadSavedDiagnosesList();
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            showQuestion(currentNodeId);
+        });
+    </script>
+</body>
+</html>
+�
